@@ -1,0 +1,287 @@
+#pragma version >=0.2.0;
+
+;; ============================================================================
+;;
+;; Math Utilities for TON DeFi
+;; Implements essential mathematical operations with safety checks
+;;
+;; ============================================================================
+
+const int MAX_UINT128 = 340282366920938463463374607431768211455;  ;; 2^128 - 1
+const int PRECISION = 1000000000;  ;; 10^9 for TON decimals
+const int SQRT_PRECISION = 100000;  ;; Precision for square root approximation
+
+;; Error codes
+const int error::overflow = 401;
+const int error::zero_division = 402;
+const int error::invalid_power = 403;
+const int error::invalid_input = 404;
+
+;; ============================================================================
+;;
+;; Basic Operations with Overflow Protection
+;;
+;; ============================================================================
+
+{-
+  @notice Safe addition with overflow check
+  @param a First number
+  @param b Second number
+  @return Sum of a and b
+-}
+int add(int a, int b) inline {
+    int c = a + b;
+    throw_if(error::overflow, c < a | c < b);
+    return c;
+}
+
+{-
+  @notice Safe subtraction with underflow check
+  @param a First number
+  @param b Second number
+  @return Difference of a and b
+-}
+int sub(int a, int b) inline {
+    throw_if(error::overflow, a < b);
+    return a - b;
+}
+
+{-
+  @notice Safe multiplication with overflow check
+  @param a First number
+  @param b Second number
+  @return Product of a and b
+-}
+int mul(int a, int b) inline {
+    if (a == 0 | b == 0) {
+        return 0;
+    }
+    int c = a * b;
+    throw_if(error::overflow, c / a != b);
+    return c;
+}
+
+{-
+  @notice Safe division with zero check and rounding
+  @param a Numerator
+  @param b Denominator
+  @return Quotient of a and b
+-}
+int div(int a, int b) inline {
+    throw_if(error::zero_division, b == 0);
+    return a / b;
+}
+
+;; ============================================================================
+;;
+;; DeFi Specific Math Operations
+;;
+;; ============================================================================
+
+{-
+  @notice Calculate square root using Newton's method
+  @param x Input number
+  @return Approximate square root of x
+-}
+int sqrt(int x) inline {
+    throw_if(error::invalid_input, x < 0);
+    if (x == 0) {
+        return 0;
+    }
+    
+    int z = (x + 1) / 2;
+    int y = x;
+    
+    repeat(10) {
+        if (z < y) {
+            y = z;
+            z = (x / z + z) / 2;
+        }
+    }
+    
+    return y;
+}
+
+{-
+  @notice Calculate percentage with precision
+  @param value Base value
+  @param percentage Percentage to calculate
+  @return Percentage of value
+-}
+int percentage(int value, int percentage) inline {
+    throw_if(error::invalid_input, percentage > 100 * PRECISION);
+    return mul(value, percentage) / (100 * PRECISION);
+}
+
+{-
+  @notice Minimum of two numbers
+  @param a First number
+  @param b Second number
+  @return Smaller of a and b
+-}
+int min(int a, int b) inline {
+    if (a > b) {
+        return b;
+    }
+    return a;
+}
+
+{-
+  @notice Maximum of two numbers
+  @param a First number
+  @param b Second number
+  @return Larger of a and b
+-}
+int max(int a, int b) inline {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+;; ============================================================================
+;;
+;; AMM Specific Calculations
+;;
+;; ============================================================================
+
+{-
+  @notice Calculate liquidity tokens to mint
+  @param amount0 Amount of first token
+  @param amount1 Amount of second token
+  @param reserve0 Reserve of first token
+  @param reserve1 Reserve of second token
+  @param total_supply Total supply of LP tokens
+  @return Amount of liquidity tokens to mint
+-}
+int calculate_liquidity(int amount0, int amount1, int reserve0, int reserve1, int total_supply) inline {
+    if (total_supply == 0) {
+        return sqrt(mul(amount0, amount1));
+    }
+    
+    return min(
+        mul(amount0, total_supply) / reserve0,
+        mul(amount1, total_supply) / reserve1
+    );
+}
+
+{-
+  @notice Calculate amount out given amount in
+  @param amount_in Amount of input token
+  @param reserve_in Reserve of input token
+  @param reserve_out Reserve of output token
+  @param fee_numerator Fee numerator (e.g., 3 for 0.3%)
+  @param fee_denominator Fee denominator (e.g., 1000 for 0.3%)
+  @return Amount of output tokens
+-}
+int get_amount_out(int amount_in, int reserve_in, int reserve_out, int fee_numerator, int fee_denominator) inline {
+    throw_if(error::invalid_input, 
+        amount_in <= 0 | 
+        reserve_in <= 0 | 
+        reserve_out <= 0
+    );
+    
+    int amount_in_with_fee = mul(amount_in, sub(fee_denominator, fee_numerator));
+    int numerator = mul(amount_in_with_fee, reserve_out);
+    int denominator = add(mul(reserve_in, fee_denominator), amount_in_with_fee);
+    
+    return div(numerator, denominator);
+}
+
+{-
+  @notice Calculate optimal swap amount for two tokens
+  @param amount_a Desired amount of token A
+  @param amount_b Desired amount of token B
+  @param reserve_a Reserve of token A
+  @param reserve_b Reserve of token B
+  @return Optimal amounts for both tokens
+-}
+(int, int) optimize_swap(int amount_a, int amount_b, int reserve_a, int reserve_b) inline {
+    if (amount_a * reserve_b == amount_b * reserve_a) {
+        return (amount_a, amount_b);
+    }
+    
+    int optimal_b = div(mul(amount_a, reserve_b), reserve_a);
+    if (optimal_b <= amount_b) {
+        return (amount_a, optimal_b);
+    }
+    
+    int optimal_a = div(mul(amount_b, reserve_a), reserve_b);
+    return (optimal_a, amount_b);
+}
+
+;; ============================================================================
+;;
+;; Fixed Point Math Operations
+;;
+;; ============================================================================
+
+{-
+  @notice Convert fixed point number to regular number
+  @param x Fixed point number
+  @return Regular number
+-}
+int from_fixed_point(int x) inline {
+    return x / PRECISION;
+}
+
+{-
+  @notice Convert regular number to fixed point
+  @param x Regular number
+  @return Fixed point number
+-}
+int to_fixed_point(int x) inline {
+    return x * PRECISION;
+}
+
+{-
+  @notice Multiply two fixed point numbers
+  @param a First fixed point number
+  @param b Second fixed point number
+  @return Product in fixed point representation
+-}
+int fixed_mul(int a, int b) inline {
+    return div(mul(a, b), PRECISION);
+}
+
+{-
+  @notice Divide two fixed point numbers
+  @param a Numerator fixed point number
+  @param b Denominator fixed point number
+  @return Quotient in fixed point representation
+-}
+int fixed_div(int a, int b) inline {
+    return div(mul(a, PRECISION), b);
+}
+
+;; ============================================================================
+;;
+;; Gas Optimization Functions
+;;
+;; ============================================================================
+
+{-
+  @notice Fast power calculation for small exponents
+  @param base Base number
+  @param exponent Exponent (must be positive)
+  @return Power result
+-}
+int pow_small(int base, int exponent) inline {
+    throw_if(error::invalid_power, exponent < 0);
+    
+    int result = 1;
+    repeat(exponent) {
+        result = mul(result, base);
+    }
+    return result;
+}
+
+{-
+  @notice Efficient average calculation
+  @param a First number
+  @param b Second number
+  @return Average of a and b
+-}
+int avg(int a, int b) inline {
+    return (a & b) + ((a ^ b) >> 1);
+}

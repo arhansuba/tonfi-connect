@@ -1,0 +1,277 @@
+#pragma version >=0.2.0;
+
+;; ============================================================================
+;;
+;; Simple AMM Pool Contract for TON Blockchain
+;; Handles swaps, liquidity provision, and withdrawals
+;;
+;; ============================================================================
+
+;; Storage Variables
+global int ctx_reserve0;
+global int ctx_reserve1;
+global int ctx_total_supply;
+global cell ctx_lp_wallets;
+global int const::DECIMAL_FACTOR = 1000000000; ;; 10^9 for TON decimals
+global int const::MIN_LIQUIDITY = 1000; ;; Minimum liquidity to prevent attacks
+global int const::FEE_DENOMINATOR = 1000;
+global int const::FEE_NUMERATOR = 3; ;; 0.3% fee
+
+;; Error Codes
+const int error::unauthorized = 101;
+const int error::insufficient_liquidity = 102;
+const int error::insufficient_amount = 103;
+const int error::invalid_token = 104;
+const int error::slippage_too_high = 105;
+
+;; Operation Codes
+const int op::swap = 1;
+const int op::add_liquidity = 2;
+const int op::remove_liquidity = 3;
+const int op::transfer = 4;
+
+;; ============================================================================
+;;
+;; Data Structures
+;;
+;; ============================================================================
+
+{-
+  init_storage#_ owner:MsgAddress
+                  token0:MsgAddress
+                  token1:MsgAddress
+                  = Storage;
+-}
+
+() load_data() impure {
+    var ds = get_data().begin_parse();
+    ctx_reserve0 = ds~load_coins();
+    ctx_reserve1 = ds~load_coins();
+    ctx_total_supply = ds~load_coins();
+    ctx_lp_wallets = ds~load_dict();
+    ds.end_parse();
+}
+
+() save_data() impure {
+    set_data(begin_cell()
+        .store_coins(ctx_reserve0)
+        .store_coins(ctx_reserve1)
+        .store_coins(ctx_total_supply)
+        .store_dict(ctx_lp_wallets)
+        .end_cell());
+}
+
+;; ============================================================================
+;;
+;; Utilities
+;;
+;; ============================================================================
+
+int min(int x, int y) inline {
+    if (x > y) { return y; }
+    return x;
+}
+
+int get_lp_tokens(slice address) inline {
+    (int amount, int found?) = ctx_lp_wallets.udict_get?(267, address.hash());
+    if (found?) {
+        return amount;
+    }
+    return 0;
+}
+
+() set_lp_tokens(slice address, int amount) impure inline {
+    ctx_lp_wallets~udict_set(267, address.hash(), begin_cell().store_coins(amount).end_cell());
+}
+
+;; ============================================================================
+;;
+;; Core Logic
+;;
+;; ============================================================================
+
+(int) calculate_swap_amount(int reserve_in, int reserve_out, int amount_in) inline {
+    int amount_in_with_fee = (amount_in * (FEE_DENOMINATOR - FEE_NUMERATOR));
+    return (amount_in_with_fee * reserve_out) / ((reserve_in * FEE_DENOMINATOR) + amount_in_with_fee);
+}
+
+() handle_swap(slice msg) impure {
+    int token_in = msg~load_uint(1); ;; 0 for token0, 1 for token1
+    int min_amount_out = msg~load_coins();
+    int amount_in = msg~load_coins();
+    slice sender_address = msg~load_msg_addr();
+    
+    throw_if(error::insufficient_amount, amount_in < const::MIN_LIQUIDITY);
+    
+    ;; Load reserves
+    int reserve_in = token_in ? ctx_reserve1 : ctx_reserve0;
+    int reserve_out = token_in ? ctx_reserve0 : ctx_reserve1;
+    
+    ;; Calculate output amount
+    int amount_out = calculate_swap_amount(reserve_in, reserve_out, amount_in);
+    throw_if(error::slippage_too_high, amount_out < min_amount_out);
+    
+    ;; Update reserves
+    if (token_in) {
+        ctx_reserve1 += amount_in;
+        ctx_reserve0 -= amount_out;
+    } else {
+        ctx_reserve0 += amount_in;
+        ctx_reserve1 -= amount_out;
+    }
+    
+    ;; Send tokens to user
+    var msg = begin_cell()
+        .store_uint(op::transfer, 32)
+        .store_coins(amount_out)
+        .store_slice(sender_address)
+        .end_cell();
+        
+    send_raw_message(msg, 1); ;; pay transfer fees from contract's balance
+}
+
+() handle_add_liquidity(slice msg) impure {
+    int amount0_desired = msg~load_coins();
+    int amount1_desired = msg~load_coins();
+    int amount0_min = msg~load_coins();
+    int amount1_min = msg~load_coins();
+    slice provider_address = msg~load_msg_addr();
+    
+    ;; Calculate optimal amounts
+    int amount0;
+    int amount1;
+    
+    if (ctx_reserve0 == 0 && ctx_reserve1 == 0) {
+        amount0 = amount0_desired;
+        amount1 = amount1_desired;
+    } else {
+        int amount1_optimal = (amount0_desired * ctx_reserve1) / ctx_reserve0;
+        if (amount1_optimal <= amount1_desired) {
+            throw_if(error::insufficient_amount, amount1_optimal < amount1_min);
+            amount0 = amount0_desired;
+            amount1 = amount1_optimal;
+        } else {
+            int amount0_optimal = (amount1_desired * ctx_reserve0) / ctx_reserve1;
+            throw_if(error::insufficient_amount, amount0_optimal < amount0_min);
+            amount0 = amount0_optimal;
+            amount1 = amount1_desired;
+        }
+    }
+    
+    ;; Calculate liquidity tokens to mint
+    int liquidity;
+    if (ctx_total_supply == 0) {
+        liquidity = sqrt(amount0 * amount1) - const::MIN_LIQUIDITY;
+        set_lp_tokens(my_address(), const::MIN_LIQUIDITY); ;; Lock minimum liquidity
+    } else {
+        liquidity = min(
+            (amount0 * ctx_total_supply) / ctx_reserve0,
+            (amount1 * ctx_total_supply) / ctx_reserve1
+        );
+    }
+    
+    throw_if(error::insufficient_liquidity, liquidity <= 0);
+    
+    ;; Update state
+    ctx_reserve0 += amount0;
+    ctx_reserve1 += amount1;
+    ctx_total_supply += liquidity;
+    
+    ;; Update LP tokens
+    int current_lp = get_lp_tokens(provider_address);
+    set_lp_tokens(provider_address, current_lp + liquidity);
+    
+    save_data();
+}
+
+() handle_remove_liquidity(slice msg) impure {
+    int liquidity = msg~load_coins();
+    int amount0_min = msg~load_coins();
+    int amount1_min = msg~load_coins();
+    slice provider_address = msg~load_msg_addr();
+    
+    ;; Check LP token balance
+    int lp_balance = get_lp_tokens(provider_address);
+    throw_if(error::insufficient_amount, liquidity > lp_balance);
+    
+    ;; Calculate output amounts
+    int amount0 = (liquidity * ctx_reserve0) / ctx_total_supply;
+    int amount1 = (liquidity * ctx_reserve1) / ctx_total_supply;
+    
+    throw_if(error::slippage_too_high, 
+        amount0 < amount0_min || amount1 < amount1_min
+    );
+    
+    ;; Update state
+    ctx_reserve0 -= amount0;
+    ctx_reserve1 -= amount1;
+    ctx_total_supply -= liquidity;
+    set_lp_tokens(provider_address, lp_balance - liquidity);
+    
+    ;; Send tokens back to provider
+    var msg0 = begin_cell()
+        .store_uint(op::transfer, 32)
+        .store_coins(amount0)
+        .store_slice(provider_address)
+        .end_cell();
+    
+    var msg1 = begin_cell()
+        .store_uint(op::transfer, 32)
+        .store_coins(amount1)
+        .store_slice(provider_address)
+        .end_cell();
+        
+    send_raw_message(msg0, 1);
+    send_raw_message(msg1, 1);
+    
+    save_data();
+}
+
+;; ============================================================================
+;;
+;; Get Methods
+;;
+;; ============================================================================
+
+(int, int) get_reserves() method_id {
+    load_data();
+    return (ctx_reserve0, ctx_reserve1);
+}
+
+int get_lp_balance(slice address) method_id {
+    load_data();
+    return get_lp_tokens(address);
+}
+
+;; ============================================================================
+;;
+;; Main Entry Points
+;;
+;; ============================================================================
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { return (); } ;; Ignore empty messages
+    
+    slice cs = in_msg_full.begin_parse();
+    cs~load_uint(4);  ;; skip flags
+    slice sender_address = cs~load_msg_addr();
+    
+    load_data();
+    
+    int op = in_msg_body~load_uint(32);
+    
+    if (op == op::swap) {
+        handle_swap(in_msg_body);
+    } elseif (op == op::add_liquidity) {
+        handle_add_liquidity(in_msg_body);
+    } elseif (op == op::remove_liquidity) {
+        handle_remove_liquidity(in_msg_body);
+    }
+    
+    save_data();
+}
+
+() recv_external(slice in_msg) impure {
+    ;; Handle external messages if needed
+    return ();
+}
