@@ -1,0 +1,309 @@
+#pragma version ^0.2.0
+
+#include "../utils/Constants.fc";
+#include "../utils/Math.fc";
+#include "../utils/Security.fc";
+
+;; Operation codes
+const int op::deposit = 1;
+const int op::withdraw = 2;
+const int op::allocate_budget = 3;
+const int op::execute_proposal = 4;
+const int op::sweep_tokens = 5;
+const int op::set_strategy = 6;
+
+;; Error codes
+const int error::unauthorized = 101;
+const int error::insufficient_balance = 102;
+const int error::invalid_amount = 103;
+const int error::invalid_allocation = 104;
+const int error::strategy_exists = 105;
+const int error::invalid_strategy = 106;
+const int error::execution_failed = 107;
+
+;; Treasury allocation types
+const int allocation::reserves = 1;      ;; Emergency reserves
+const int allocation::operations = 2;     ;; Operations budget
+const int allocation::development = 3;    ;; Development funding
+const int allocation::marketing = 4;      ;; Marketing budget
+const int allocation::staking = 5;        ;; Staking rewards
+
+;; Storage variables
+global_var owner: Address;           ;; DAO contract address
+global_var total_balance: Int;       ;; Total treasury balance
+global_var last_report_time: Int;    ;; Last financial report timestamp
+global_var dao_contract: Address;    ;; DAO contract address
+global_var executor: Address;        ;; Executor contract address
+
+;; Budget allocation structure
+struct BudgetAllocation {
+    allocation_type: Int;
+    amount: Int;
+    used: Int;
+    last_update: Int;
+    active: Bool;
+}
+
+;; Investment strategy structure
+struct Strategy {
+    address: Address;
+    allocation: Int;         ;; Percentage of total funds (0-10000 for 0-100%)
+    performance_fee: Int;    ;; Basis points
+    active: Bool;
+    last_report: Int;
+    total_returns: Int;
+}
+
+;; Storage
+global_var allocations: map<Int, BudgetAllocation>;
+global_var strategies: map<Address, Strategy>;
+global_var approved_tokens: map<Address, Bool>;
+
+() load_data() impure {
+    var ds = get_data().begin_parse();
+    owner = ds~load_msg_addr();
+    total_balance = ds~load_coins();
+    last_report_time = ds~load_uint(64);
+    dao_contract = ds~load_msg_addr();
+    executor = ds~load_msg_addr();
+    
+    ;; Load allocations and strategies
+    allocations = ds~load_allocations_map();
+    strategies = ds~load_strategies_map();
+    approved_tokens = ds~load_approved_tokens_map();
+}
+
+() save_data() impure {
+    set_data(begin_cell()
+        .store_slice(owner)
+        .store_coins(total_balance)
+        .store_uint(last_report_time, 64)
+        .store_slice(dao_contract)
+        .store_slice(executor)
+        .store_allocations_map(allocations)
+        .store_strategies_map(strategies)
+        .store_approved_tokens_map(approved_tokens)
+        .end_cell());
+}
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { 
+        ;; Accept plain TON transfers
+        handle_deposit(msg_value, sender_address);
+        return ();
+    }
+    
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { return (); }
+    
+    slice sender_address = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
+    
+    load_data();
+    
+    ;; Access control
+    throw_unless(error::unauthorized, 
+        equal_slices(sender_address, owner) |
+        equal_slices(sender_address, dao_contract) |
+        equal_slices(sender_address, executor));
+    
+    if (op == op::deposit) {
+        handle_deposit(msg_value, sender_address);
+    } elseif (op == op::withdraw) {
+        handle_withdraw(sender_address, in_msg_body);
+    } elseif (op == op::allocate_budget) {
+        handle_allocate_budget(sender_address, in_msg_body);
+    } elseif (op == op::execute_proposal) {
+        handle_execute_proposal(sender_address, in_msg_body);
+    } elseif (op == op::sweep_tokens) {
+        handle_sweep_tokens(sender_address, in_msg_body);
+    } elseif (op == op::set_strategy) {
+        handle_set_strategy(sender_address, in_msg_body);
+    }
+    
+    save_data();
+}
+
+;; Handle deposits
+() handle_deposit(int amount, slice sender) impure {
+    throw_unless(error::invalid_amount, amount > 0);
+    
+    total_balance += amount;
+    
+    ;; Update strategy allocations if needed
+    if (strategies.null?() == false) {
+        redistribute_funds();
+    }
+    
+    ;; Emit deposit event
+    emit_log_deposit(sender, amount);
+}
+
+;; Handle withdrawals
+() handle_withdraw(slice sender, slice msg) impure {
+    int amount = msg~load_coins();
+    int allocation_type = msg~load_uint(8);
+    
+    throw_unless(error::invalid_amount, amount > 0);
+    throw_unless(error::insufficient_balance, amount <= total_balance);
+    
+    ;; Check allocation if specified
+    if (allocation_type != 0) {
+        var (allocation, found?) = allocations.get(allocation_type);
+        throw_unless(error::invalid_allocation, found?);
+        throw_unless(error::insufficient_balance, amount <= (allocation.amount - allocation.used));
+        
+        ;; Update allocation usage
+        allocation.used += amount;
+        allocations.set(allocation_type, allocation);
+    }
+    
+    ;; Update total balance
+    total_balance -= amount;
+    
+    ;; Transfer tokens
+    send_tokens(sender, amount);
+    
+    ;; Emit withdrawal event
+    emit_log_withdrawal(sender, amount, allocation_type);
+}
+
+;; Handle budget allocation
+() handle_allocate_budget(slice sender, slice msg) impure {
+    int allocation_type = msg~load_uint(8);
+    int amount = msg~load_coins();
+    
+    throw_unless(error::invalid_amount, amount > 0);
+    throw_unless(error::insufficient_balance, amount <= total_balance);
+    
+    ;; Create or update allocation
+    var (allocation, found?) = allocations.get(allocation_type);
+    if (found?) {
+        allocation.amount = amount;
+        allocation.used = 0;
+        allocation.last_update = now();
+    } else {
+        allocation = BudgetAllocation{
+            allocation_type: allocation_type,
+            amount: amount,
+            used: 0,
+            last_update: now(),
+            active: true
+        };
+    }
+    
+    allocations.set(allocation_type, allocation);
+    
+    ;; Emit allocation event
+    emit_log_budget_allocated(allocation_type, amount);
+}
+
+;; Handle investment strategy setting
+() handle_set_strategy(slice sender, slice msg) impure {
+    slice strategy_address = msg~load_msg_addr();
+    int allocation_percentage = msg~load_uint(16);  ;; 0-10000 for 0-100%
+    int performance_fee = msg~load_uint(16);        ;; Basis points
+    
+    throw_unless(error::invalid_allocation, allocation_percentage <= 10000);
+    throw_unless(error::invalid_amount, performance_fee <= 10000);
+    
+    ;; Create or update strategy
+    var (strategy, found?) = strategies.get(strategy_address);
+    if (found?) {
+        strategy.allocation = allocation_percentage;
+        strategy.performance_fee = performance_fee;
+        strategy.last_report = now();
+    } else {
+        strategy = Strategy{
+            address: strategy_address,
+            allocation: allocation_percentage,
+            performance_fee: performance_fee,
+            active: true,
+            last_report: now(),
+            total_returns: 0
+        };
+    }
+    
+    strategies.set(strategy_address, strategy);
+    
+    ;; Redistribute funds if needed
+    redistribute_funds();
+    
+    ;; Emit strategy event
+    emit_log_strategy_set(strategy_address, allocation_percentage, performance_fee);
+}
+
+;; Handle strategy returns collection
+() handle_strategy_report(slice strategy_address, int returns) impure {
+    var (strategy, found?) = strategies.get(strategy_address);
+    throw_unless(error::invalid_strategy, found?);
+    
+    ;; Calculate performance fee
+    int fee = muldiv(returns, strategy.performance_fee, 10000);
+    int net_returns = returns - fee;
+    
+    ;; Update strategy stats
+    strategy.total_returns += net_returns;
+    strategy.last_report = now();
+    strategies.set(strategy_address, strategy);
+    
+    ;; Update total balance
+    total_balance += net_returns;
+    
+    ;; Handle performance fee
+    if (fee > 0) {
+        send_tokens(strategy_address, fee);
+    }
+    
+    ;; Emit report event
+    emit_log_strategy_report(strategy_address, returns, fee);
+}
+
+;; Helper functions
+() redistribute_funds() impure {
+    int total_allocation = 0;
+    int[] strategy_allocations = {};
+    
+    ;; Calculate total allocation
+    var strategy_list = strategies.to_list();
+    foreach (strategy in strategy_list) {
+        if (strategy.active) {
+            total_allocation += strategy.allocation;
+            strategy_allocations~append(strategy.allocation);
+        }
+    }
+    
+    throw_unless(error::invalid_allocation, total_allocation <= 10000);
+    
+    ;; Redistribute funds according to allocations
+    int i = 0;
+    foreach (strategy in strategy_list) {
+        if (strategy.active) {
+            int amount = muldiv(total_balance, strategy_allocations[i], 10000);
+            send_tokens(strategy.address, amount);
+            i += 1;
+        }
+    }
+}
+
+;; Get methods
+int get_total_balance() method_id {
+    return total_balance;
+}
+
+(BudgetAllocation, bool) get_allocation(int allocation_type) method_id {
+    return allocations.get(allocation_type);
+}
+
+(Strategy, bool) get_strategy(slice address) method_id {
+    return strategies.get(address);
+}
+
+cell get_all_allocations() method_id {
+    return pack_allocations_dict();
+}
+
+cell get_all_strategies() method_id {
+    return pack_strategies_dict();
+}

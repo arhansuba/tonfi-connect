@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-//import { useBridge } from '@/hooks/useBridge';
+import { useBridge } from '../../hooks/useBridge';
 import { ArrowDownUp, Info, ArrowRight, AlertCircle } from 'lucide-react';
 import {
     Card,
@@ -23,7 +23,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { useTonConnect } from '@tonconnect/ui-react';
-import { useBridge } from '../hooks/useBridge';
 
 interface Chain {
     id: number;

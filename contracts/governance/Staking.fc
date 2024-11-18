@@ -1,0 +1,259 @@
+#pragma version ^0.2.0
+
+#include "../utils/Constants.fc";
+#include "../utils/Math.fc";
+#include "../utils/Security.fc";
+
+;; Operation codes
+const int op::stake = 1;
+const int op::unstake = 2;
+const int op::claim_rewards = 3;
+const int op::update_rewards = 4;
+const int op::emergency_withdraw = 5;
+
+;; Error codes
+const int error::insufficient_balance = 101;
+const int error::no_stake_found = 102;
+const int error::invalid_amount = 103;
+const int error::lock_period_active = 104;
+const int error::unauthorized = 105;
+const int error::invalid_reward_rate = 106;
+
+;; Staking parameters
+const int REWARD_PRECISION = 1000000000;  ;; 9 decimals
+const int MIN_STAKE_PERIOD = 86400;       ;; 1 day in seconds
+const int UNSTAKE_WINDOW = 172800;        ;; 2 days in seconds
+
+;; Storage variables
+global_var owner: Address;
+global_var tfix_token: Address;
+global_var total_staked: Int;
+global_var reward_rate: Int;
+global_var last_update_time: Int;
+global_var rewards_per_token: Int;
+
+;; Staker information
+struct StakerInfo {
+    amount: Int;              ;; Staked amount
+    rewards_debt: Int;        ;; Rewards already accounted for
+    last_stake_time: Int;     ;; Timestamp of last stake
+    unlock_time: Int;         ;; When tokens can be unstaked
+    rewards_per_token_paid: Int;  ;; Snapshot of rewards_per_token
+}
+
+;; Contract storage
+global_var stakers: map<Address, StakerInfo>;
+
+() load_data() impure {
+    var ds = get_data().begin_parse();
+    owner = ds~load_msg_addr();
+    tfix_token = ds~load_msg_addr();
+    total_staked = ds~load_coins();
+    reward_rate = ds~load_uint(32);
+    last_update_time = ds~load_uint(64);
+    rewards_per_token = ds~load_uint(128);
+    stakers = ds~load_staker_map();
+}
+
+() save_data() impure {
+    set_data(begin_cell()
+        .store_slice(owner)
+        .store_slice(tfix_token)
+        .store_coins(total_staked)
+        .store_uint(reward_rate, 32)
+        .store_uint(last_update_time, 64)
+        .store_uint(rewards_per_token, 128)
+        .store_staker_map(stakers)
+        .end_cell());
+}
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { return (); }
+    
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { return (); }
+    
+    slice sender_address = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
+    
+    load_data();
+    update_rewards_per_token();
+    
+    if (op == op::stake) {
+        handle_stake(sender_address, msg_value, in_msg_body);
+    } elseif (op == op::unstake) {
+        handle_unstake(sender_address, in_msg_body);
+    } elseif (op == op::claim_rewards) {
+        handle_claim_rewards(sender_address);
+    } elseif (op == op::update_rewards) {
+        handle_update_rewards(sender_address, in_msg_body);
+    } elseif (op == op::emergency_withdraw) {
+        handle_emergency_withdraw(sender_address);
+    }
+    
+    save_data();
+}
+
+;; Stake tokens
+() handle_stake(slice sender, int msg_value, slice msg) impure {
+    throw_unless(error::invalid_amount, msg_value > 0);
+    
+    ;; Load or create staker info
+    var (info, found?) = stakers.get(sender);
+    if (!found?) {
+        info = StakerInfo{
+            amount: 0,
+            rewards_debt: 0,
+            last_stake_time: now(),
+            unlock_time: now() + MIN_STAKE_PERIOD,
+            rewards_per_token_paid: rewards_per_token
+        };
+    }
+    
+    ;; Update staker info
+    info.amount += msg_value;
+    info.last_stake_time = now();
+    info.unlock_time = now() + MIN_STAKE_PERIOD;
+    info.rewards_per_token_paid = rewards_per_token;
+    
+    ;; Update total staked
+    total_staked += msg_value;
+    
+    ;; Store updated info
+    stakers.set(sender, info);
+    
+    ;; Emit stake event
+    emit_log_stake(sender, msg_value);
+}
+
+;; Unstake tokens
+() handle_unstake(slice sender, slice msg) impure {
+    int amount = msg~load_coins();
+    
+    var (info, found?) = stakers.get(sender);
+    throw_unless(error::no_stake_found, found?);
+    throw_unless(error::insufficient_balance, info.amount >= amount);
+    throw_unless(error::lock_period_active, now() >= info.unlock_time);
+    
+    ;; Calculate pending rewards
+    int pending_rewards = calculate_rewards(sender, info);
+    
+    ;; Update staker info
+    info.amount -= amount;
+    info.rewards_debt = muldiv(info.amount, rewards_per_token, REWARD_PRECISION);
+    info.rewards_per_token_paid = rewards_per_token;
+    
+    ;; Update total staked
+    total_staked -= amount;
+    
+    ;; Store updated info or remove if no stake left
+    if (info.amount > 0) {
+        stakers.set(sender, info);
+    } else {
+        stakers.delete(sender);
+    }
+    
+    ;; Send tokens and rewards
+    send_tokens(sender, amount);
+    if (pending_rewards > 0) {
+        send_reward_tokens(sender, pending_rewards);
+    }
+    
+    ;; Emit unstake event
+    emit_log_unstake(sender, amount, pending_rewards);
+}
+
+;; Claim rewards
+() handle_claim_rewards(slice sender) impure {
+    var (info, found?) = stakers.get(sender);
+    throw_unless(error::no_stake_found, found?);
+    
+    ;; Calculate pending rewards
+    int pending_rewards = calculate_rewards(sender, info);
+    throw_unless(error::invalid_amount, pending_rewards > 0);
+    
+    ;; Update staker info
+    info.rewards_debt = muldiv(info.amount, rewards_per_token, REWARD_PRECISION);
+    info.rewards_per_token_paid = rewards_per_token;
+    
+    ;; Store updated info
+    stakers.set(sender, info);
+    
+    ;; Send rewards
+    send_reward_tokens(sender, pending_rewards);
+    
+    ;; Emit claim event
+    emit_log_claim_rewards(sender, pending_rewards);
+}
+
+;; Update reward rate (owner only)
+() handle_update_rewards(slice sender, slice msg) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    int new_rate = msg~load_uint(32);
+    throw_unless(error::invalid_reward_rate, new_rate >= 0);
+    
+    reward_rate = new_rate;
+    
+    ;; Emit rate update event
+    emit_log_reward_rate_updated(new_rate);
+}
+
+;; Emergency withdrawal (owner only)
+() handle_emergency_withdraw(slice sender) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    ;; Calculate contract balance
+    int balance = get_balance();
+    throw_unless(error::insufficient_balance, balance > 0);
+    
+    ;; Send all tokens to owner
+    send_tokens(owner, balance);
+    
+    ;; Emit emergency withdrawal event
+    emit_log_emergency_withdraw(balance);
+}
+
+;; Helper functions
+() update_rewards_per_token() impure {
+    if (total_staked == 0) {
+        last_update_time = now();
+        return ();
+    }
+    
+    int time_elapsed = now() - last_update_time;
+    if (time_elapsed > 0 && total_staked > 0) {
+        rewards_per_token += muldiv(time_elapsed * reward_rate, REWARD_PRECISION, total_staked);
+        last_update_time = now();
+    }
+}
+
+int calculate_rewards(slice staker, StakerInfo info) inline {
+    return muldiv(info.amount, rewards_per_token - info.rewards_per_token_paid, REWARD_PRECISION);
+}
+
+;; Get methods
+(int, StakerInfo) get_staker_info(slice staker_address) method_id {
+    var (info, found?) = stakers.get(staker_address);
+    return (found?, info);
+}
+
+int get_pending_rewards(slice staker_address) method_id {
+    var (info, found?) = stakers.get(staker_address);
+    if (!found?) { return 0; }
+    return calculate_rewards(staker_address, info);
+}
+
+int get_total_staked() method_id {
+    return total_staked;
+}
+
+int get_reward_rate() method_id {
+    return reward_rate;
+}
+
+int get_apr() method_id {
+    if (total_staked == 0) { return 0; }
+    return muldiv(reward_rate * 31536000, REWARD_PRECISION * 100, total_staked);  ;; Annualized rate
+}

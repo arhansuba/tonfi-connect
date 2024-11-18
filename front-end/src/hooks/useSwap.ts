@@ -8,8 +8,7 @@ import {
     SendMode
 } from '@ton/ton';
 import { BigNumber } from 'bignumber.js';
-import { useTonWallet } from '@tonconnect/ui-react';
-import { useTonConnect } from '@tonconnect/ui-react';
+import { useTonWallet, useTonConnectUI } from '@tonconnect/ui-react';
 
 interface TokenInfo {
     address: string;
@@ -32,29 +31,9 @@ interface SwapQuote {
     fee: string;
 }
 
-interface UseSwapReturn {
-    // States
-    inputAmount: string;
-    setInputAmount: (amount: string) => void;
-    outputAmount: string;
-    tokenIn: TokenInfo | null;
-    setTokenIn: (token: TokenInfo | null) => void;
-    tokenOut: TokenInfo | null;
-    setTokenOut: (token: TokenInfo | null) => void;
-    settings: SwapSettings;
-    updateSettings: (settings: Partial<SwapSettings>) => void;
-    loading: boolean;
-    error: string | null;
-    
-    // Actions
-    executeSwap: () => Promise<void>;
-    getQuote: () => Promise<SwapQuote | null>;
-    approveToken: (token: TokenInfo) => Promise<void>;
-    
-    // Utils
-    switchTokens: () => void;
-    validateSwap: () => string | null;
-    resetState: () => void;
+interface PoolReserves {
+    reserveIn: BigNumber;
+    reserveOut: BigNumber;
 }
 
 const DEFAULT_SETTINGS: SwapSettings = {
@@ -63,10 +42,10 @@ const DEFAULT_SETTINGS: SwapSettings = {
     autoRouting: true
 };
 
-export function useSwap(): UseSwapReturn {
+export function useSwap() {
     // Connect wallet and client
     const wallet = useTonWallet();
-    const { connected, connector } = useTonConnect();
+    const [tonConnectUI] = useTonConnectUI();
     const [client] = useState(() => new TonClient({
         endpoint: process.env.NEXT_PUBLIC_TON_ENDPOINT || 'https://testnet.toncenter.com/api/v2/jsonRPC'
     }));
@@ -96,32 +75,65 @@ export function useSwap(): UseSwapReturn {
         }
     }, [inputAmount, tokenIn, tokenOut, settings.slippageTolerance]);
 
-    // Token balance updates
-    useEffect(() => {
-        if (connected && tokenIn) {
-            updateTokenBalance(tokenIn);
-        }
-    }, [connected, tokenIn, wallet]);
-
-    const updateTokenBalance = async (token: TokenInfo) => {
-        try {
-            const balance = await getTokenBalance(token.address);
-            setTokenIn(prev => prev ? { ...prev, balance } : null);
-        } catch (error) {
-            console.error('Failed to update balance:', error);
-        }
-    };
-
+    // Get token balance
     const getTokenBalance = async (tokenAddress: string): Promise<string> => {
         if (!wallet?.account.address) throw new Error('Wallet not connected');
         
-        const balance = await client.callGetMethod(
+        const result = await client.callGetMethod(
             Address.parse(tokenAddress),
             'get_wallet_balance',
-            [{ type: 'slice', value: wallet.account.address }]
+            [{
+                type: 'slice',
+                cell: beginCell().storeAddress(Address.parse(wallet.account.address)).endCell()
+            }]
         );
         
-        return fromNano(balance.stack.readBigNumber());
+        return fromNano(result.stack.readBigNumber());
+    };
+
+    // Get pool address
+    const getPool = async (tokenInAddress: string, tokenOutAddress: string): Promise<Address> => {
+        const result = await client.callGetMethod(
+            Address.parse(process.env.NEXT_PUBLIC_FACTORY_ADDRESS!),
+            'get_pool',
+            [
+                { type: 'slice', cell: beginCell().storeAddress(Address.parse(tokenInAddress)).endCell() },
+                { type: 'slice', cell: beginCell().storeAddress(Address.parse(tokenOutAddress)).endCell() }
+            ]
+        );
+
+        return result.stack.readAddress();
+    };
+
+    // Get pool reserves
+    const getPoolReserves = async (poolAddress: Address): Promise<PoolReserves> => {
+        const result = await client.callGetMethod(
+            poolAddress,
+            'get_reserves',
+            []
+        );
+
+        return {
+            reserveIn: new BigNumber(result.stack.readBigNumber().toString()),
+            reserveOut: new BigNumber(result.stack.readBigNumber().toString())
+        };
+    };
+
+    // Wait for transaction
+    const waitForTransaction = async (boc: string): Promise<void> => {
+        let attempts = 0;
+        const maxAttempts = 10;
+        
+        while (attempts < maxAttempts) {
+            try {
+                await client.getTransaction(Address.parse(boc), '', '');
+                return;
+            } catch (e) {
+                attempts++;
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            }
+        }
+        throw new Error('Transaction not found');
     };
 
     const getQuote = async (): Promise<SwapQuote | null> => {
@@ -130,12 +142,12 @@ export function useSwap(): UseSwapReturn {
             
             setLoading(true);
             
-            // Get pool data
-            const pool = await getPool(tokenIn.address, tokenOut.address);
-            const reserves = await getPoolReserves(pool);
+            // Get pool address and reserves
+            const poolAddress = await getPool(tokenIn.address, tokenOut.address);
+            const reserves = await getPoolReserves(poolAddress);
             
             // Calculate amounts
-            const amountIn = toNano(inputAmount);
+            const amountIn = new BigNumber(toNano(inputAmount).toString());
             const estimatedOutput = calculateOutputAmount(
                 amountIn,
                 reserves.reserveIn,
@@ -160,11 +172,11 @@ export function useSwap(): UseSwapReturn {
             const fee = calculateFee(amountIn);
             
             const quote: SwapQuote = {
-                estimatedOutput: fromNano(estimatedOutput),
-                minimumOutput: fromNano(minimumOutput),
+                estimatedOutput: fromNano(estimatedOutput.toString()),
+                minimumOutput: fromNano(minimumOutput.toString()),
                 priceImpact,
                 route: [tokenIn.address, tokenOut.address],
-                fee: fromNano(fee)
+                fee: fromNano(fee.toString())
             };
             
             setLastQuote(quote);
@@ -182,14 +194,16 @@ export function useSwap(): UseSwapReturn {
 
     const executeSwap = async (): Promise<void> => {
         try {
-            if (!validateSwap()) throw new Error('Invalid swap parameters');
+            const validationError = validateSwap();
+            if (validationError) throw new Error(validationError);
             if (!wallet?.account.address) throw new Error('Wallet not connected');
             if (!lastQuote) throw new Error('No quote available');
+            if (!tonConnectUI.connector) throw new Error('Connector not available');
             
             setLoading(true);
             
             // Prepare swap message
-            const message = beginCell()
+            const messageBody = beginCell()
                 .storeUint(1, 32) // op: swap
                 .storeAddress(Address.parse(tokenIn!.address))
                 .storeAddress(Address.parse(tokenOut!.address))
@@ -199,23 +213,25 @@ export function useSwap(): UseSwapReturn {
                 .endCell();
 
             // Send transaction
-            const result = await connector.sendTransaction({
+            const result = await tonConnectUI.connector.sendTransaction({
                 validUntil: Math.floor(Date.now() / 1000) + settings.deadline * 60,
                 messages: [
                     {
                         address: process.env.NEXT_PUBLIC_ROUTER_ADDRESS!,
                         amount: toNano(inputAmount).toString(),
-                        payload: message.toBoc().toString('base64'),
-                        stateInit: null
+                        payload: messageBody.toBoc().toString('base64')
                     }
                 ]
             });
 
             // Wait for transaction
-            await waitForTransaction(result.hash);
+            await waitForTransaction(result.boc);
             
-            // Update balances
-            await updateTokenBalance(tokenIn!);
+            // Update token balances
+            if (tokenIn) {
+                const balance = await getTokenBalance(tokenIn.address);
+                setTokenIn({ ...tokenIn, balance });
+            }
             
             // Reset state
             setInputAmount('');
@@ -230,8 +246,47 @@ export function useSwap(): UseSwapReturn {
         }
     };
 
+    // Utility functions
+    const calculateOutputAmount = (
+        amountIn: BigNumber,
+        reserveIn: BigNumber,
+        reserveOut: BigNumber
+    ): BigNumber => {
+        const amountInWithFee = amountIn.multipliedBy(997);
+        const numerator = amountInWithFee.multipliedBy(reserveOut);
+        const denominator = reserveIn.multipliedBy(1000).plus(amountInWithFee);
+        return numerator.dividedToIntegerBy(denominator);
+    };
+
+    const calculateMinimumOutput = (
+        estimatedOutput: BigNumber,
+        slippageTolerance: number
+    ): BigNumber => {
+        return estimatedOutput.multipliedBy(
+            new BigNumber(10000 - slippageTolerance).dividedBy(10000)
+        ).integerValue(BigNumber.ROUND_DOWN);
+    };
+
+    const calculatePriceImpact = (
+        amountIn: BigNumber,
+        amountOut: BigNumber,
+        reserveIn: BigNumber,
+        reserveOut: BigNumber
+    ): number => {
+        const exactQuote = reserveOut.dividedBy(reserveIn);
+        const executionPrice = amountOut.dividedBy(amountIn);
+        return exactQuote.minus(executionPrice)
+            .dividedBy(exactQuote)
+            .multipliedBy(100)
+            .toNumber();
+    };
+
+    const calculateFee = (amountIn: BigNumber): BigNumber => {
+        return amountIn.multipliedBy(3).dividedToIntegerBy(1000); // 0.3% fee
+    };
+
     const validateSwap = (): string | null => {
-        if (!connected) return 'Wallet not connected';
+        if (!wallet) return 'Wallet not connected';
         if (!tokenIn || !tokenOut) return 'Select tokens';
         if (!inputAmount || isNaN(Number(inputAmount))) return 'Enter amount';
         if (!lastQuote) return 'Get quote first';
@@ -264,44 +319,6 @@ export function useSwap(): UseSwapReturn {
         setError(null);
     }, []);
 
-    // Utility functions
-    const calculateOutputAmount = (
-        amountIn: BigNumber,
-        reserveIn: BigNumber,
-        reserveOut: BigNumber
-    ): BigNumber => {
-        const amountInWithFee = amountIn.multipliedBy(997);
-        const numerator = amountInWithFee.multipliedBy(reserveOut);
-        const denominator = reserveIn.multipliedBy(1000).plus(amountInWithFee);
-        return numerator.dividedBy(denominator);
-    };
-
-    const calculateMinimumOutput = (
-        estimatedOutput: BigNumber,
-        slippageTolerance: number
-    ): BigNumber => {
-        return estimatedOutput.multipliedBy(
-            new BigNumber(10000 - slippageTolerance).dividedBy(10000)
-        );
-    };
-
-    const calculatePriceImpact = (
-        amountIn: BigNumber,
-        amountOut: BigNumber,
-        reserveIn: BigNumber,
-        reserveOut: BigNumber
-    ): number => {
-        const exactQuote = reserveOut.dividedBy(reserveIn);
-        const executionPrice = amountOut.dividedBy(amountIn);
-        return (
-            exactQuote.minus(executionPrice).dividedBy(exactQuote).multipliedBy(100).toNumber()
-        );
-    };
-
-    const calculateFee = (amountIn: BigNumber): BigNumber => {
-        return amountIn.multipliedBy(3).dividedBy(1000); // 0.3% fee
-    };
-
     return {
         // States
         inputAmount,
@@ -319,7 +336,6 @@ export function useSwap(): UseSwapReturn {
         // Actions
         executeSwap,
         getQuote,
-        approveToken: async () => {}, // Implement if needed
         
         // Utils
         switchTokens,

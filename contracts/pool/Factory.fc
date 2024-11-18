@@ -1,0 +1,258 @@
+#pragma version ^0.2.0
+
+#include "../utils/Constants.fc";
+#include "../utils/Math.fc";
+#include "../utils/Security.fc";
+
+;; Operation codes
+const int op::create_pool = 1;
+const int op::set_fee_to = 2;
+const int op::set_fee_protocol = 3;
+const int op::collect_protocol_fee = 4;
+const int op::upgrade_pool = 5;
+
+;; Error codes
+const int error::unauthorized = 101;
+const int error::pool_exists = 102;
+const int error::invalid_tokens = 103;
+const int error::invalid_fee = 104;
+const int error::pool_not_found = 105;
+const int error::same_tokens = 106;
+
+;; Constants
+const int MIN_FEE = 1;      ;; 0.01%
+const int MAX_FEE = 1000;   ;; 10%
+const int PROTOCOL_FEE_DENOMINATOR = 10000;
+
+;; Storage variables
+global_var owner: Address;
+global_var pool_implementation: Address;
+global_var fee_to: Address;
+global_var fee_protocol: Int;          ;; Protocol fee in basis points
+global_var all_pools_count: Int;
+
+;; Pool information structure
+struct PoolInfo {
+    token0: Address;         ;; First token address
+    token1: Address;         ;; Second token address
+    fee: Int;               ;; Pool fee in basis points
+    pool_address: Address;   ;; Deployed pool address
+    created_time: Int;       ;; Pool creation timestamp
+    total_volume: Int;       ;; Total trading volume
+    tvl: Int;               ;; Total value locked
+}
+
+;; Storage
+global_var pools: map<Address, PoolInfo>;          ;; Pool address => Pool info
+global_var token_pairs: map<Address, map<Address, Address>>;  ;; Token0 => Token1 => Pool address
+
+() load_data() impure {
+    var ds = get_data().begin_parse();
+    owner = ds~load_msg_addr();
+    pool_implementation = ds~load_msg_addr();
+    fee_to = ds~load_msg_addr();
+    fee_protocol = ds~load_uint(16);
+    all_pools_count = ds~load_uint(32);
+    
+    pools = ds~load_pools_map();
+    token_pairs = ds~load_token_pairs_map();
+}
+
+() save_data() impure {
+    set_data(begin_cell()
+        .store_slice(owner)
+        .store_slice(pool_implementation)
+        .store_slice(fee_to)
+        .store_uint(fee_protocol, 16)
+        .store_uint(all_pools_count, 32)
+        .store_pools_map(pools)
+        .store_token_pairs_map(token_pairs)
+        .end_cell());
+}
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { return (); }
+    
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { return (); }
+    
+    slice sender_address = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
+    
+    load_data();
+    
+    if (op == op::create_pool) {
+        handle_create_pool(sender_address, in_msg_body);
+    } elseif (op == op::set_fee_to) {
+        handle_set_fee_to(sender_address, in_msg_body);
+    } elseif (op == op::set_fee_protocol) {
+        handle_set_fee_protocol(sender_address, in_msg_body);
+    } elseif (op == op::collect_protocol_fee) {
+        handle_collect_protocol_fee(sender_address, in_msg_body);
+    } elseif (op == op::upgrade_pool) {
+        handle_upgrade_pool(sender_address, in_msg_body);
+    }
+    
+    save_data();
+}
+
+;; Create new pool
+() handle_create_pool(slice sender, slice msg) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    slice token0 = msg~load_msg_addr();
+    slice token1 = msg~load_msg_addr();
+    int fee = msg~load_uint(16);
+    
+    ;; Validate inputs
+    throw_if(error::same_tokens, equal_slices(token0, token1));
+    throw_unless(error::invalid_fee, fee >= MIN_FEE & fee <= MAX_FEE);
+    
+    ;; Check pool doesn't exist
+    slice pool_address = calculate_pool_address(token0, token1, fee);
+    throw_if(error::pool_exists, pools.exists?(pool_address));
+    
+    ;; Deploy pool contract
+    cell state_init = calculate_pool_state_init(
+        token0,
+        token1,
+        fee,
+        pool_implementation
+    );
+    
+    cell deploy_message = begin_cell()
+        .store_uint(0x18, 6)           ;; nobounce
+        .store_slice(pool_address)
+        .store_coins(0)
+        .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+        .store_ref(state_init)
+        .store_ref(prepare_pool_data(token0, token1, fee))
+        .end_cell();
+    
+    send_raw_message(deploy_message, 64);  ;; carry all remaining value
+    
+    ;; Create pool info
+    PoolInfo pool_info = PoolInfo{
+        token0: token0,
+        token1: token1,
+        fee: fee,
+        pool_address: pool_address,
+        created_time: now(),
+        total_volume: 0,
+        tvl: 0
+    };
+    
+    ;; Store pool info
+    pools.set(pool_address, pool_info);
+    token_pairs.get(token0).set(token1, pool_address);
+    token_pairs.get(token1).set(token0, pool_address);
+    all_pools_count += 1;
+    
+    ;; Emit pool creation event
+    emit_log_pool_created(pool_address, token0, token1, fee);
+}
+
+;; Set protocol fee collector
+() handle_set_fee_to(slice sender, slice msg) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    slice new_fee_to = msg~load_msg_addr();
+    fee_to = new_fee_to;
+    
+    ;; Emit fee collector update event
+    emit_log_fee_to_updated(new_fee_to);
+}
+
+;; Set protocol fee
+() handle_set_fee_protocol(slice sender, slice msg) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    int new_fee = msg~load_uint(16);
+    throw_unless(error::invalid_fee, new_fee <= MAX_FEE);
+    
+    fee_protocol = new_fee;
+    
+    ;; Emit protocol fee update event
+    emit_log_protocol_fee_updated(new_fee);
+}
+
+;; Collect protocol fees from pool
+() handle_collect_protocol_fee(slice sender, slice msg) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    slice pool_address = msg~load_msg_addr();
+    var (pool_info, found?) = pools.get(pool_address);
+    throw_unless(error::pool_not_found, found?);
+    
+    ;; Send collect message to pool
+    cell msg = begin_cell()
+        .store_uint(op::collect_protocol_fee, 32)
+        .store_slice(fee_to)
+        .end_cell();
+    
+    send_simple_message(pool_address, msg);
+}
+
+;; Upgrade pool implementation
+() handle_upgrade_pool(slice sender, slice msg) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    slice pool_address = msg~load_msg_addr();
+    slice new_implementation = msg~load_msg_addr();
+    
+    var (pool_info, found?) = pools.get(pool_address);
+    throw_unless(error::pool_not_found, found?);
+    
+    ;; Send upgrade message to pool
+    cell msg = begin_cell()
+        .store_uint(op::upgrade_pool, 32)
+        .store_slice(new_implementation)
+        .end_cell();
+    
+    send_simple_message(pool_address, msg);
+}
+
+;; Helper functions
+cell prepare_pool_data(slice token0, slice token1, int fee) inline {
+    return begin_cell()
+        .store_slice(token0)
+        .store_slice(token1)
+        .store_uint(fee, 16)
+        .store_slice(owner)
+        .store_slice(fee_to)
+        .store_uint(fee_protocol, 16)
+        .end_cell();
+}
+
+slice calculate_pool_address(slice token0, slice token1, int fee) inline {
+    cell state_init = calculate_pool_state_init(token0, token1, fee, pool_implementation);
+    return calculate_address(0, state_init);
+}
+
+;; Get methods
+(PoolInfo, bool) get_pool_info(slice pool_address) method_id {
+    return pools.get(pool_address);
+}
+
+slice get_pool(slice token0, slice token1) method_id {
+    return token_pairs.get(token0).get(token1);
+}
+
+int get_num_pools() method_id {
+    return all_pools_count;
+}
+
+cell get_all_pools() method_id {
+    return begin_cell()
+        .store_dict(pack_pools_dict())
+        .end_cell();
+}
+
+int get_protocol_fee() method_id {
+    return fee_protocol;
+}
+
+slice get_fee_collector() method_id {
+    return fee_to;
+}

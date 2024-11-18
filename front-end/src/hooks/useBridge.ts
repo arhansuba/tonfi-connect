@@ -9,7 +9,7 @@ import {
 } from '@ton/ton';
 import { BigNumber } from 'bignumber.js';
 import { useTonWallet } from '@tonconnect/ui-react';
-import { useTonConnect } from '@tonconnect/ui-react';
+import { useTonConnectUI } from '@tonconnect/ui-react';
 
 interface ChainInfo {
     id: number;
@@ -68,7 +68,8 @@ interface UseBridgeReturn {
 export function useBridge(): UseBridgeReturn {
     // Initialize wallet and client connections
     const wallet = useTonWallet();
-    const { connected, connector } = useTonConnect();
+    const [tonConnectUI, setTonConnectUI] = useTonConnectUI();
+    const { connected, connector } = tonConnectUI;
     const [client] = useState(() => new TonClient({
         endpoint: process.env.NEXT_PUBLIC_TON_ENDPOINT || 'https://testnet.toncenter.com/api/v2/jsonRPC'
     }));
@@ -201,14 +202,17 @@ export function useBridge(): UseBridgeReturn {
                             .plus(fees.gasEstimate)
                             .toString(),
                         payload: message.toBoc().toString('base64'),
-                        stateInit: null
+                        stateInit: undefined
                     }
                 ]
             });
 
+            // Assuming result contains a transaction ID or similar identifier
+            const transactionId = result.transactionId || 'unknown';
+
             // Create pending transaction
             const newTransaction: BridgeTransaction = {
-                hash: result.hash,
+                hash: transactionId,
                 fromChain: sourceChain!.id,
                 toChain: targetChain!.id,
                 amount,
@@ -224,7 +228,7 @@ export function useBridge(): UseBridgeReturn {
             // Reset form
             resetState();
 
-            return result.hash;
+            return transactionId;
 
         } catch (error) {
             console.error('Bridge failed:', error);
@@ -272,7 +276,7 @@ export function useBridge(): UseBridgeReturn {
             const status = await client.callGetMethod(
                 Address.parse(process.env.NEXT_PUBLIC_BRIDGE_ADDRESS!),
                 'get_transfer_status',
-                [{ type: 'slice', value: hash }]
+                [{ type: 'slice', cell: beginCell().storeBuffer(Buffer.from(hash, 'hex')).endCell() }]
             );
 
             const tx = pendingTransactions.find(t => t.hash === hash);

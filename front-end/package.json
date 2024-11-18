@@ -1,0 +1,31 @@
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "react": "^17.0.2",
+    "react-dom": "^17.0.2",
+    "@ton/ton": "^1.0.0",
+    "@tonconnect/ui-react": "^1.0.0",
+    "recharts": "^2.0.0"
+  },
+  "devDependencies": {
+    "tailwindcss": "^2.2.19",
+    "postcss": "^8.3.11",
+    "autoprefixer": "^10.3.7",
+    "typescript": "^4.4.4",
+    "@types/react": "^17.0.33",
+    "@types/react-dom": "^17.0.10",
+    "husky": "^7.0.0"
+  }
+}

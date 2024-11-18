@@ -1,0 +1,189 @@
+#pragma version ^0.2.0
+
+#include "../utils/Constants.fc";
+#include "../utils/Math.fc";
+#include "../utils/Security.fc";
+
+;; Message operation codes
+const int op::transfer_tokens = 1;
+const int op::lock_tokens = 2;
+const int op::unlock_tokens = 3;
+const int op::verify_transfer = 4;
+
+;; Error codes
+const int error::unauthorized = 101;
+const int error::invalid_signature = 102;
+const int error::invalid_amount = 103;
+const int error::invalid_chain = 104;
+const int error::invalid_message = 105;
+
+;; Storage variables
+global_var bridge_address: Address;
+global_var validators: map<Address, Bool>;
+global_var min_validators: Int;
+global_var nonce: Int;
+
+;; Message structure
+struct TransferMessage {
+    source_chain: Int;
+    target_chain: Int;
+    token_address: Address;
+    amount: Int;
+    recipient: Address;
+    nonce: Int;
+}
+
+() save_data() impure {
+    set_data(begin_cell()
+        .store_ref(pack_validators())
+        .store_uint(min_validators, 8)
+        .store_uint(nonce, 64)
+        .store_slice(bridge_address)
+        .end_cell());
+}
+
+cell pack_validators() {
+    cell dict = new_dict();
+    map_to_dict(validators, dict);
+    return dict;
+}
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { 
+        return (); ;; Ignore empty messages
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { ;; Ignore all bounced messages
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+    
+    int op = in_msg_body~load_uint(32);
+    
+    ;; Load contract data
+    (cell validators_dict, int min_validators, int current_nonce, slice bridge_addr) = load_data();
+    validators = dict_to_map(validators_dict);
+
+    ;; Route message to appropriate handler
+    if (op == op::transfer_tokens) {
+        handle_transfer(in_msg_body, sender_address);
+    } elseif (op == op::verify_transfer) {
+        handle_verification(in_msg_body, sender_address);
+    } elseif (op == op::lock_tokens) {
+        handle_token_lock(in_msg_body, sender_address, msg_value);
+    } elseif (op == op::unlock_tokens) {
+        handle_token_unlock(in_msg_body, sender_address);
+    }
+    
+    save_data();
+}
+
+() handle_transfer(slice msg, slice sender) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, bridge_address));
+    
+    TransferMessage message = parse_transfer_message(msg);
+    
+    ;; Verify chain IDs
+    throw_unless(error::invalid_chain, is_valid_chain(message.source_chain));
+    throw_unless(error::invalid_chain, is_valid_chain(message.target_chain));
+    
+    ;; Process transfer
+    process_transfer(message);
+}
+
+() handle_verification(slice msg, slice sender) impure {
+    ;; Verify sender is a validator
+    throw_unless(error::unauthorized, validators.get(sender));
+    
+    ;; Parse and verify signature
+    cell signature = msg~load_ref();
+    cell message = msg~load_ref();
+    
+    throw_unless(error::invalid_signature, 
+        verify_signature(signature, message, sender));
+    
+    ;; Update verification status
+    update_transfer_status(message);
+}
+
+() handle_token_lock(slice msg, slice sender, int value) impure {
+    throw_unless(error::invalid_amount, value >= MIN_TRANSFER_AMOUNT);
+    
+    ;; Parse lock parameters
+    int target_chain = msg~load_uint(32);
+    slice recipient = msg~load_msg_addr();
+    
+    ;; Lock tokens
+    lock_tokens(sender, value, target_chain, recipient);
+}
+
+() handle_token_unlock(slice msg, slice sender) impure {
+    throw_unless(error::unauthorized, validators.get(sender));
+    
+    ;; Parse unlock parameters
+    cell proof = msg~load_ref();
+    slice recipient = msg~load_msg_addr();
+    int amount = msg~load_coins();
+    
+    ;; Verify and process unlock
+    process_unlock(proof, recipient, amount);
+}
+
+;; Helper functions
+TransferMessage parse_transfer_message(slice msg) inline {
+    return TransferMessage{
+        source_chain: msg~load_uint(32),
+        target_chain: msg~load_uint(32),
+        token_address: msg~load_msg_addr(),
+        amount: msg~load_coins(),
+        recipient: msg~load_msg_addr(),
+        nonce: msg~load_uint(64)
+    };
+}
+
+() process_transfer(TransferMessage message) impure {
+    ;; Add message to pending transfers
+    cell transfer_data = begin_cell()
+        .store_uint(message.source_chain, 32)
+        .store_uint(message.target_chain, 32)
+        .store_slice(message.token_address)
+        .store_coins(message.amount)
+        .store_slice(message.recipient)
+        .store_uint(message.nonce, 64)
+        .end_cell();
+        
+    pending_transfers.set(message.nonce, transfer_data);
+}
+
+() update_transfer_status(cell message) impure {
+    int nonce = get_message_nonce(message);
+    var (transfer, found?) = pending_transfers.get(nonce);
+    throw_unless(error::invalid_message, found?);
+    
+    ;; Update verification count
+    verified_transfers.set(nonce, verified_transfers.get(nonce) + 1);
+    
+    ;; Check if enough verifications
+    if (verified_transfers.get(nonce) >= min_validators) {
+        finalize_transfer(nonce);
+    }
+}
+
+;; Get methods for external queries
+(int, cell) get_transfer_status(int nonce) method_id {
+    var (transfer, found?) = pending_transfers.get(nonce);
+    if (found?) {
+        return (verified_transfers.get(nonce), transfer);
+    }
+    return (0, null());
+}
+
+int get_min_validators() method_id {
+    return min_validators;
+}
+
+int is_validator(slice address) method_id {
+    return validators.get(address) ?? false;
+}

@@ -1,0 +1,218 @@
+#pragma version ^0.2.0
+
+#include "../utils/Constants.fc";
+#include "../utils/Math.fc";
+#include "../utils/Security.fc";
+
+;; Operation codes
+const int op::register_validator = 1;
+const int op::remove_validator = 2;
+const int op::submit_signature = 3;
+const int op::update_threshold = 4;
+const int op::challenge_validator = 5;
+
+;; Error codes
+const int error::unauthorized = 101;
+const int error::invalid_signature = 102;
+const int error::validator_exists = 103;
+const int error::validator_not_found = 104;
+const int error::invalid_threshold = 105;
+const int error::insufficient_stake = 106;
+
+;; Storage
+global_var owner: Address;
+global_var validators: map<Address, ValidatorInfo>;
+global_var signature_threshold: Int;
+global_var total_validators: Int;
+global_var min_stake: Int;
+
+;; Validator information structure
+struct ValidatorInfo {
+    stake: Int;
+    status: Int;  ;; 0 = inactive, 1 = active, 2 = slashed
+    signed_messages: Int;
+    last_signature: Int;
+    registration_time: Int;
+}
+
+;; Contract persistent data structure
+() load_data() impure inline {
+    var ds = get_data().begin_parse();
+    owner = ds~load_msg_addr();
+    signature_threshold = ds~load_uint(8);
+    min_stake = ds~load_coins();
+    total_validators = ds~load_uint(16);
+    validators = ds~load_validator_map();
+}
+
+() save_data() impure inline {
+    set_data(pack_validator_data());
+}
+
+cell pack_validator_data() inline {
+    return begin_cell()
+        .store_slice(owner)
+        .store_uint(signature_threshold, 8)
+        .store_coins(min_stake)
+        .store_uint(total_validators, 16)
+        .store_validator_map(validators)
+        .end_cell();
+}
+
+;; Main entry point
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { return (); }
+    
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { return (); } ;; Ignore bounced messages
+    
+    slice sender_address = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
+    
+    load_data();
+    
+    if (op == op::register_validator) {
+        handle_validator_registration(sender_address, msg_value, in_msg_body);
+    } elseif (op == op::remove_validator) {
+        handle_validator_removal(sender_address, in_msg_body);
+    } elseif (op == op::submit_signature) {
+        handle_signature_submission(sender_address, in_msg_body);
+    } elseif (op == op::update_threshold) {
+        handle_threshold_update(sender_address, in_msg_body);
+    } elseif (op == op::challenge_validator) {
+        handle_validator_challenge(sender_address, in_msg_body);
+    }
+    
+    save_data();
+}
+
+;; Validator registration
+() handle_validator_registration(slice sender, int msg_value, slice msg) impure {
+    ;; Check stake amount
+    throw_unless(error::insufficient_stake, msg_value >= min_stake);
+    
+    ;; Verify validator doesn't already exist
+    throw_if(error::validator_exists, validators.exists?(sender));
+    
+    ;; Load validator public key and metadata
+    slice pubkey = msg~load_uint(256);
+    cell metadata = msg~load_ref();
+    
+    ;; Create validator record
+    validators.set(sender, ValidatorInfo{
+        stake: msg_value,
+        status: 1,  ;; Active
+        signed_messages: 0,
+        last_signature: now(),
+        registration_time: now()
+    });
+    
+    total_validators += 1;
+    
+    ;; Emit registration event
+    emit_log_register_validator(sender, msg_value, pubkey);
+}
+
+;; Validator removal
+() handle_validator_removal(slice sender, slice msg) impure {
+    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    
+    slice validator_addr = msg~load_msg_addr();
+    throw_unless(error::validator_not_found, validators.exists?(validator_addr));
+    
+    ;; Get validator info
+    var (validator_info, _) = validators.get(validator_addr);
+    
+    ;; Return stake if active
+    if (validator_info.status == 1) {
+        send_tokens(validator_addr, validator_info.stake);
+    }
+    
+    ;; Remove validator
+    validators.delete(validator_addr);
+    total_validators -= 1;
+    
+    ;; Emit removal event
+    emit_log_remove_validator(validator_addr);
+}
+
+;; Signature submission
+() handle_signature_submission(slice sender, slice msg) impure {
+    ;; Verify sender is an active validator
+    throw_unless(error::unauthorized, is_active_validator(sender));
+    
+    ;; Load message data and signature
+    cell message = msg~load_ref();
+    cell signature = msg~load_ref();
+    
+    ;; Verify signature
+    throw_unless(error::invalid_signature, 
+        verify_validator_signature(sender, message, signature));
+    
+    ;; Update validator stats
+    update_validator_stats(sender);
+    
+    ;; Process signature
+    process_signature(sender, message, signature);
+}
+
+;; Validator challenge
+() handle_validator_challenge(slice sender, slice msg) impure {
+    slice challenged_addr = msg~load_msg_addr();
+    cell proof = msg~load_ref();
+    
+    ;; Verify the challenge
+    if (verify_challenge(challenged_addr, proof)) {
+        slash_validator(challenged_addr);
+    }
+}
+
+;; Helper functions
+() update_validator_stats(slice validator_addr) impure {
+    var (info, found?) = validators.get(validator_addr);
+    throw_unless(error::validator_not_found, found?);
+    
+    info.signed_messages += 1;
+    info.last_signature = now();
+    
+    validators.set(validator_addr, info);
+}
+
+int is_active_validator(slice addr) inline {
+    var (info, found?) = validators.get(addr);
+    return found? & (info.status == 1);
+}
+
+() slash_validator(slice addr) impure {
+    var (info, found?) = validators.get(addr);
+    throw_unless(error::validator_not_found, found?);
+    
+    ;; Update validator status to slashed
+    info.status = 2;
+    validators.set(addr, info);
+    
+    ;; Send stake to treasury
+    send_tokens(treasury_address, info.stake);
+    
+    ;; Emit slashing event
+    emit_log_slash_validator(addr);
+}
+
+;; Get methods
+(int, ValidatorInfo) get_validator_info(slice addr) method_id {
+    var (info, found?) = validators.get(addr);
+    return (found?, info);
+}
+
+int get_total_validators() method_id {
+    return total_validators;
+}
+
+int get_signature_threshold() method_id {
+    return signature_threshold;
+}
+
+cell get_all_validators() method_id {
+    return pack_validator_map();
+}
