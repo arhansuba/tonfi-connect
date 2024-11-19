@@ -1,8 +1,9 @@
 import { 
     TonClient, 
     Address, 
-    Contract,
-    WalletContract 
+    Contract as TonContract,
+    WalletContractV4, 
+    Contract
 } from '@ton/ton';
 import axios from 'axios';
 import { EventEmitter } from 'events';
@@ -78,7 +79,7 @@ class PriceOracle extends EventEmitter {
 
     async stop(): Promise<void> {
         if (this.updateInterval) {
-            clearInterval(this.updateInterval);
+            clearInterval(this.updateInterval as NodeJS.Timeout);
             this.updateInterval = null;
         }
         this.emit('stopped');
@@ -267,10 +268,9 @@ class PriceOracle extends EventEmitter {
             }
             
             if (validPrices.length > 0) {
-                await this.contract.sendMessage({
-                    op: 'updatePrices',
+                await this.contract.call('updatePrices', {
                     prices: validPrices
-                });
+                }).send();
                 
                 this.emit('onChainUpdated', validPrices);
             }

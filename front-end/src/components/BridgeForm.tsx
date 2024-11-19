@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useBridge } from '../../hooks/useBridge';
+import { useBridge } from '../hooks/useBridge';
 import { ArrowDownUp, Info, ArrowRight, AlertCircle } from 'lucide-react';
 import {
     Card,
@@ -12,30 +12,26 @@ import {
 import {
     Alert,
     AlertDescription,
-    AlertTitle,
 } from '@/components/ui/alert';
-import {
-    Tooltip,
-    TooltipContent,
-    TooltipTrigger,
-} from '@/components/ui/tooltip';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Progress } from '@/components/ui/progress';
-import { useTonConnect } from '@tonconnect/ui-react';
+import { useTonConnectUI } from '@tonconnect/ui-react';
 
-interface Chain {
+// Define shared interface for chain information
+export interface Chain {
     id: number;
     name: string;
     icon: string;
     nativeToken: string;
     explorerUrl: string;
+    enabled: boolean;
     minAmount: string;
     maxAmount: string;
     estimatedTime: number;
 }
 
-const CHAINS: Chain[] = [
+// Export the chains array so it can be used by other components
+export const CHAINS: Chain[] = [
     {
         id: 1,
         name: 'TON',
@@ -44,7 +40,8 @@ const CHAINS: Chain[] = [
         explorerUrl: 'https://tonscan.org',
         minAmount: '10',
         maxAmount: '1000000',
-        estimatedTime: 2
+        estimatedTime: 2,
+        enabled: true
     },
     {
         id: 2,
@@ -54,7 +51,8 @@ const CHAINS: Chain[] = [
         explorerUrl: 'https://etherscan.io',
         minAmount: '0.1',
         maxAmount: '1000',
-        estimatedTime: 15
+        estimatedTime: 15,
+        enabled: true
     },
     {
         id: 3,
@@ -64,12 +62,72 @@ const CHAINS: Chain[] = [
         explorerUrl: 'https://bscscan.com',
         minAmount: '0.1',
         maxAmount: '5000',
-        estimatedTime: 5
+        estimatedTime: 5,
+        enabled: true
     }
 ];
 
+interface FeeEstimate {
+    bridgeFee: string;
+    gasEstimate: string;
+    estimatedTime: number;
+}
+
+interface PendingTransaction {
+    hash: string;
+    amount: string;
+    fromChain: string;
+    toChain: string;
+    confirmations: number;
+    requiredConfirmations: number;
+}
+
+// Declare global Telegram types
+declare global {
+    interface Window {
+        Telegram: {
+            WebApp: {
+                showPopup: (params: { title: string; message: string; buttons: { type: string }[] }) => void;
+                showConfirm: (message: string, callback: (confirmed: boolean) => void) => void;
+                showAlert: (message: string) => void;
+            };
+        };
+    }
+}
+
+const ChainSelector: React.FC<{
+    value: Chain | null;
+    onChange: (chain: Chain) => void;
+    exclude?: Chain | null;
+    label: string;
+}> = ({ value, onChange, exclude, label }) => (
+    <div className="space-y-2">
+        <label className="text-sm text-gray-500">{label}</label>
+        <div className="grid grid-cols-3 gap-2">
+            {CHAINS
+                .filter(chain => chain.enabled && chain !== exclude)
+                .map(chain => (
+                    <Button
+                        key={chain.id}
+                        variant={value?.id === chain.id ? "default" : "outline"}
+                        className="flex flex-col items-center p-4 h-auto"
+                        onClick={() => onChange(chain)}
+                    >
+                        <img
+                            src={chain.icon}
+                            alt={chain.name}
+                            className="w-8 h-8 mb-2"
+                        />
+                        <span className="text-sm">{chain.name}</span>
+                    </Button>
+                ))}
+        </div>
+    </div>
+);
+
 export const BridgeForm: React.FC = () => {
-    const { connected, connector } = useTonConnect();
+    const [tonConnectUI] = useTonConnectUI();
+    const { connected } = tonConnectUI;
     const {
         sourceChain,
         setSourceChain,
@@ -86,13 +144,8 @@ export const BridgeForm: React.FC = () => {
         switchChains,
     } = useBridge();
 
-    const [fees, setFees] = useState<{
-        bridgeFee: string;
-        networkFee: string;
-        estimatedTime: number;
-    } | null>(null);
+    const [fees, setFees] = useState<FeeEstimate | null>(null);
 
-    // Update fees when input changes
     useEffect(() => {
         const updateFees = async () => {
             if (amount && sourceChain && targetChain) {
@@ -100,7 +153,7 @@ export const BridgeForm: React.FC = () => {
                     const estimatedFees = await estimateFees();
                     setFees({
                         bridgeFee: estimatedFees.bridgeFee,
-                        networkFee: estimatedFees.gasEstimate,
+                        gasEstimate: estimatedFees.gasEstimate,
                         estimatedTime: targetChain.estimatedTime
                     });
                 } catch (error) {
@@ -111,18 +164,18 @@ export const BridgeForm: React.FC = () => {
 
         const debounce = setTimeout(updateFees, 500);
         return () => clearTimeout(debounce);
-    }, [amount, sourceChain, targetChain]);
+    }, [amount, sourceChain, targetChain, estimateFees]);
 
     const handleBridge = async () => {
         try {
             if (!connected) {
-                await connector.connect();
+                await tonConnectUI.connectWallet();
                 return;
             }
 
             const validationError = validateBridge();
             if (validationError) {
-                Telegram.WebApp.showPopup({
+                window.Telegram.WebApp.showPopup({
                     title: 'Validation Error',
                     message: validationError,
                     buttons: [{ type: 'ok' }]
@@ -130,12 +183,11 @@ export const BridgeForm: React.FC = () => {
                 return;
             }
 
-            // Show confirmation popup
             const confirmation = await new Promise<boolean>((resolve) => {
-                Telegram.WebApp.showConfirm(
+                window.Telegram.WebApp.showConfirm(
                     `Bridge ${amount} ${sourceChain?.nativeToken} to ${targetChain?.name}?\n\n` +
                     `Bridge Fee: ${fees?.bridgeFee}\n` +
-                    `Network Fee: ${fees?.networkFee}\n` +
+                    `Network Fee: ${fees?.gasEstimate}\n` +
                     `Estimated Time: ${fees?.estimatedTime} minutes`,
                     (confirmed) => resolve(confirmed)
                 );
@@ -145,46 +197,15 @@ export const BridgeForm: React.FC = () => {
 
             const txHash = await executeBridge();
 
-            // Show success message
-            Telegram.WebApp.showAlert(
+            window.Telegram.WebApp.showAlert(
                 `Bridge initiated!\nTransaction Hash: ${txHash.slice(0, 8)}...${txHash.slice(-6)}`
             );
 
         } catch (error) {
             console.error('Bridge failed:', error);
-            Telegram.WebApp.showAlert('Bridge failed. Please try again.');
+            window.Telegram.WebApp.showAlert('Bridge failed. Please try again.');
         }
     };
-
-    const ChainSelector: React.FC<{
-        value: Chain | null;
-        onChange: (chain: Chain) => void;
-        exclude?: Chain | null;
-        label: string;
-    }> = ({ value, onChange, exclude, label }) => (
-        <div className="space-y-2">
-            <label className="text-sm text-gray-500">{label}</label>
-            <div className="grid grid-cols-3 gap-2">
-                {CHAINS
-                    .filter(chain => chain !== exclude)
-                    .map(chain => (
-                        <Button
-                            key={chain.id}
-                            variant={value?.id === chain.id ? "default" : "outline"}
-                            className="flex flex-col items-center p-4 h-auto"
-                            onClick={() => onChange(chain)}
-                        >
-                            <img
-                                src={chain.icon}
-                                alt={chain.name}
-                                className="w-8 h-8 mb-2"
-                            />
-                            <span className="text-sm">{chain.name}</span>
-                        </Button>
-                    ))}
-            </div>
-        </div>
-    );
 
     return (
         <Card className="w-full max-w-md mx-auto">
@@ -196,15 +217,13 @@ export const BridgeForm: React.FC = () => {
             </CardHeader>
 
             <CardContent className="space-y-6">
-                {/* Source Chain */}
                 <ChainSelector
-                    value={sourceChain}
+                    value={sourceChain as Chain}
                     onChange={setSourceChain}
-                    exclude={targetChain}
+                    exclude={targetChain as Chain}
                     label="From"
                 />
 
-                {/* Amount Input */}
                 {sourceChain && (
                     <div className="space-y-2">
                         <label className="text-sm text-gray-500">Amount</label>
@@ -223,7 +242,6 @@ export const BridgeForm: React.FC = () => {
                     </div>
                 )}
 
-                {/* Switch Button */}
                 <div className="flex justify-center">
                     <Button
                         variant="ghost"
@@ -235,24 +253,22 @@ export const BridgeForm: React.FC = () => {
                     </Button>
                 </div>
 
-                {/* Target Chain */}
                 <ChainSelector
-                    value={targetChain}
+                    value={targetChain as Chain}
                     onChange={setTargetChain}
-                    exclude={sourceChain}
+                    exclude={sourceChain as Chain}
                     label="To"
                 />
 
-                {/* Fee Information */}
                 {fees && (
-                    <div className="space-y-2 p-4 bg-gray-50 rounded-lg">
+                    <div className="space-y-2 p-4 bg-gray-50 rounded-lg dark:bg-gray-800">
                         <div className="flex justify-between text-sm">
                             <span className="text-gray-500">Bridge Fee:</span>
                             <span>{fees.bridgeFee} {sourceChain?.nativeToken}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                             <span className="text-gray-500">Network Fee:</span>
-                            <span>{fees.networkFee} {sourceChain?.nativeToken}</span>
+                            <span>{fees.gasEstimate} {sourceChain?.nativeToken}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                             <span className="text-gray-500">Estimated Time:</span>
@@ -261,43 +277,6 @@ export const BridgeForm: React.FC = () => {
                     </div>
                 )}
 
-                {/* Pending Transactions */}
-                {pendingTransactions.length > 0 && (
-                    <div className="space-y-2">
-                        <h3 className="text-sm font-medium">Recent Transactions</h3>
-                        {pendingTransactions.map((tx) => (
-                            <div
-                                key={tx.hash}
-                                className="p-3 bg-gray-50 rounded-lg space-y-2"
-                            >
-                                <div className="flex justify-between text-sm">
-                                    <span>{tx.amount} {tx.fromChain}</span>
-                                    <ArrowRight className="h-4 w-4" />
-                                    <span>{tx.toChain}</span>
-                                </div>
-                                <Progress
-                                    value={(tx.confirmations / tx.requiredConfirmations) * 100}
-                                    className="h-1"
-                                />
-                                <div className="flex justify-between text-xs text-gray-500">
-                                    <span>
-                                        {tx.confirmations}/{tx.requiredConfirmations} confirmations
-                                    </span>
-                                    <a
-                                        href={`${CHAINS[tx.fromChain].explorerUrl}/tx/${tx.hash}`}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="text-blue-500 hover:text-blue-600"
-                                    >
-                                        View Transaction
-                                    </a>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                )}
-
-                {/* Error Display */}
                 {error && (
                     <Alert variant="destructive">
                         <AlertCircle className="h-4 w-4" />

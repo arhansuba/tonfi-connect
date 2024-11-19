@@ -3,7 +3,7 @@ import { SwapForm } from '../components/SwapForm';
 import { PriceChart } from '../components/PriceChart';
 import { TokenSelect } from '../components/TokenSelect';
 import { useSwap } from '../hooks/useSwap';
-import { useTonConnect } from '@tonconnect/ui-react';
+import { useTonConnectUI } from '@tonconnect/ui-react';
 import {
     Tabs,
     TabsContent,
@@ -47,7 +47,8 @@ interface SwapTransaction {
 }
 
 export const SwapPage: React.FC = () => {
-    const { connected, connector } = useTonConnect();
+    const [tonConnectUI, setTonConnectUI] = useTonConnectUI();
+    const { connected, wallet } = tonConnectUI;
     const [activeTab, setActiveTab] = useState('swap');
     const [showSettings, setShowSettings] = useState(false);
     const [transactions, setTransactions] = useState<SwapTransaction[]>([]);
@@ -69,12 +70,12 @@ export const SwapPage: React.FC = () => {
     // Load transactions from local storage
     useEffect(() => {
         if (connected) {
-            const storedTx = localStorage.getItem(`swap_transactions_${connector.address}`);
+            const storedTx = localStorage.getItem(`swap_transactions_${tonConnectUI.address}`);
             if (storedTx) {
                 setTransactions(JSON.parse(storedTx));
             }
         }
-    }, [connected, connector.address]);
+    }, [connected, wallet?.address]);
 
     return (
         <div className="container mx-auto p-4 space-y-6 max-w-4xl">

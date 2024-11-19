@@ -5,7 +5,6 @@ import {
     toNano,
     fromNano,
     TonClient,
-    SendMode 
 } from '@ton/ton';
 import { BigNumber } from 'bignumber.js';
 import { useTonWallet } from '@tonconnect/ui-react';
@@ -19,7 +18,7 @@ interface ChainInfo {
     enabled: boolean;
     minAmount: string;
     maxAmount: string;
-    estimatedTime: number; // in minutes
+    estimatedTime: number;
 }
 
 interface BridgeTransaction {
@@ -34,41 +33,16 @@ interface BridgeTransaction {
 }
 
 interface BridgeFees {
+    [x: string]: string;
     baseFee: string;
     percentageFee: string;
     totalFee: string;
     gasEstimate: string;
 }
 
-interface UseBridgeReturn {
-    // States
-    sourceChain: ChainInfo | null;
-    setSourceChain: (chain: ChainInfo) => void;
-    targetChain: ChainInfo | null;
-    setTargetChain: (chain: ChainInfo) => void;
-    amount: string;
-    setAmount: (amount: string) => void;
-    loading: boolean;
-    error: string | null;
-    
-    // Bridge operations
-    executeBridge: () => Promise<string>;
-    estimateFees: () => Promise<BridgeFees>;
-    
-    // Transaction management
-    pendingTransactions: BridgeTransaction[];
-    getTransactionStatus: (hash: string) => Promise<BridgeTransaction>;
-    
-    // Utils
-    validateBridge: () => string | null;
-    switchChains: () => void;
-    resetState: () => void;
-}
-
-export function useBridge(): UseBridgeReturn {
-    // Initialize wallet and client connections
+export function useBridge() {
     const wallet = useTonWallet();
-    const [tonConnectUI, setTonConnectUI] = useTonConnectUI();
+    const [tonConnectUI] = useTonConnectUI();
     const { connected, connector } = tonConnectUI;
     const [client] = useState(() => new TonClient({
         endpoint: process.env.NEXT_PUBLIC_TON_ENDPOINT || 'https://testnet.toncenter.com/api/v2/jsonRPC'
@@ -82,93 +56,109 @@ export function useBridge(): UseBridgeReturn {
     const [error, setError] = useState<string | null>(null);
     const [pendingTransactions, setPendingTransactions] = useState<BridgeTransaction[]>([]);
 
-    // Constants
-    const SUPPORTED_CHAINS: ChainInfo[] = [
-        {
-            id: 1,
-            name: 'TON',
-            icon: '/ton.svg',
-            nativeToken: 'TON',
-            enabled: true,
-            minAmount: '10',
-            maxAmount: '10000',
-            estimatedTime: 15
-        },
-        {
-            id: 2,
-            name: 'Ethereum',
-            icon: '/eth.svg',
-            nativeToken: 'ETH',
-            enabled: true,
-            minAmount: '0.1',
-            maxAmount: '100',
-            estimatedTime: 20
-        },
-        {
-            id: 3,
-            name: 'BSC',
-            icon: '/bsc.svg',
-            nativeToken: 'BNB',
-            enabled: true,
-            minAmount: '0.1',
-            maxAmount: '500',
-            estimatedTime: 10
-        }
-    ];
-
-    // Clear error on input change
     useEffect(() => {
         setError(null);
     }, [amount, sourceChain, targetChain]);
 
-    // Load pending transactions
-    useEffect(() => {
-        if (connected && wallet?.account.address) {
-            loadPendingTransactions();
-        }
-    }, [connected, wallet?.account.address]);
+    const validateBridge = useCallback((): string | null => {
+        if (!connected) return 'Wallet not connected';
+        if (!sourceChain) return 'Select source chain';
+        if (!targetChain) return 'Select target chain';
+        if (!amount || isNaN(Number(amount))) return 'Enter amount';
 
-    // Monitor pending transactions
-    useEffect(() => {
-        const interval = setInterval(async () => {
-            await updatePendingTransactions();
-        }, 15000);
+        const numAmount = Number(amount);
+        if (numAmount <= 0) return 'Invalid amount';
+        if (numAmount < Number(sourceChain.minAmount)) 
+            return `Minimum amount is ${sourceChain.minAmount} ${sourceChain.nativeToken}`;
+        if (numAmount > Number(sourceChain.maxAmount)) 
+            return `Maximum amount is ${sourceChain.maxAmount} ${sourceChain.nativeToken}`;
 
-        return () => clearInterval(interval);
-    }, [pendingTransactions]);
+        return null;
+    }, [connected, sourceChain, targetChain, amount]);
 
-    const loadPendingTransactions = async () => {
+    const estimateFees = useCallback(async (): Promise<BridgeFees> => {
         try {
-            const storage = localStorage.getItem(`bridge_transactions_${wallet?.account.address}`);
-            if (storage) {
-                const transactions: BridgeTransaction[] = JSON.parse(storage);
-                setPendingTransactions(transactions);
+            if (!amount || !sourceChain || !targetChain) {
+                throw new Error('Invalid parameters for fee estimation');
             }
+
+            const baseFeeResult = await client.callGetMethod(
+                Address.parse(process.env.NEXT_PUBLIC_BRIDGE_ADDRESS!),
+                'get_base_fee',
+                []
+            );
+
+            const baseFee = fromNano(baseFeeResult.stack.readBigNumber());
+            const percentageFee = new BigNumber(amount).multipliedBy(0.003).toString();
+            const totalFee = new BigNumber(baseFee).plus(percentageFee).toString();
+            const gasEstimate = fromNano('0.1'); // Default gas estimate
+
+            return {
+                baseFee,
+                percentageFee,
+                totalFee,
+                gasEstimate
+            };
         } catch (error) {
-            console.error('Failed to load pending transactions:', error);
+            console.error('Fee estimation failed:', error);
+            throw new Error('Failed to estimate fees');
         }
-    };
+    }, [amount, sourceChain, targetChain, client]);
 
-    const updatePendingTransactions = async () => {
-        const updatedTransactions = await Promise.all(
-            pendingTransactions.map(async (tx) => {
-                if (tx.status === 'completed' || tx.status === 'failed') {
-                    return tx;
-                }
-                return await getTransactionStatus(tx.hash);
-            })
-        );
+    const getRequiredConfirmations = useCallback((): number => {
+        switch (targetChain?.id) {
+            case 1: return 1;  // TON
+            case 2: return 12; // ETH
+            case 3: return 5;  // BSC
+            default: return 1;
+        }
+    }, [targetChain]);
 
-        setPendingTransactions(updatedTransactions);
-        savePendingTransactions(updatedTransactions);
-    };
+    const switchChains = useCallback(() => {
+        const tempChain = sourceChain;
+        setSourceChain(targetChain);
+        setTargetChain(tempChain);
+    }, [sourceChain, targetChain]);
 
-    const savePendingTransactions = (transactions: BridgeTransaction[]) => {
+    const resetState = useCallback(() => {
+        setAmount('');
+        setError(null);
+    }, []);
+
+    const savePendingTransactions = useCallback((transactions: BridgeTransaction[]) => {
         if (wallet?.account.address) {
             localStorage.setItem(
                 `bridge_transactions_${wallet.account.address}`,
                 JSON.stringify(transactions)
             );
+        }
+    }, [wallet?.account.address]);
+
+    const getTransactionStatus = async (hash: string): Promise<BridgeTransaction> => {
+        try {
+            const status = await client.callGetMethod(
+                Address.parse(process.env.NEXT_PUBLIC_BRIDGE_ADDRESS!),
+                'get_transfer_status',
+                [{
+                    type: 'cell',
+                    cell: beginCell().storeBuffer(Buffer.from(hash, 'hex')).endCell()
+                }]
+            );
+
+            const tx = pendingTransactions.find(t => t.hash === hash);
+            if (!tx) throw new Error('Transaction not found');
+
+            const confirmations = status.stack.readNumber();
+            const statusCode = status.stack.readNumber();
+
+            return {
+                ...tx,
+                confirmations,
+                status: decodeTransactionStatus(statusCode)
+            };
+        } catch (error) {
+            console.error('Failed to get transaction status:', error);
+            throw error;
         }
     };
 
@@ -177,42 +167,36 @@ export function useBridge(): UseBridgeReturn {
             const validationError = validateBridge();
             if (validationError) throw new Error(validationError);
             if (!wallet?.account.address) throw new Error('Wallet not connected');
+            if (!connector) throw new Error('Connector not initialized');
 
             setLoading(true);
 
-            // Prepare bridge message
             const message = beginCell()
-                .storeUint(1, 32) // op: lock
+                .storeUint(1, 32)
                 .storeCoins(toNano(amount))
                 .storeUint(targetChain!.id, 32)
                 .storeAddress(Address.parse(wallet.account.address))
                 .endCell();
 
-            // Calculate fees
             const fees = await estimateFees();
+            const totalAmount = new BigNumber(amount)
+                .plus(fees.totalFee)
+                .plus(fees.gasEstimate)
+                .toString();
 
-            // Send transaction
             const result = await connector.sendTransaction({
                 validUntil: Math.floor(Date.now() / 1000) + 300,
-                messages: [
-                    {
-                        address: process.env.NEXT_PUBLIC_BRIDGE_ADDRESS!,
-                        amount: (new BigNumber(amount))
-                            .plus(fees.totalFee)
-                            .plus(fees.gasEstimate)
-                            .toString(),
-                        payload: message.toBoc().toString('base64'),
-                        stateInit: undefined
-                    }
-                ]
+                messages: [{
+                    address: process.env.NEXT_PUBLIC_BRIDGE_ADDRESS!,
+                    amount: totalAmount,
+                    payload: message.toBoc().toString('base64')
+                }]
             });
 
-            // Assuming result contains a transaction ID or similar identifier
-            const transactionId = result.transactionId || 'unknown';
+            if (!result.boc) throw new Error('Failed to get transaction hash');
 
-            // Create pending transaction
             const newTransaction: BridgeTransaction = {
-                hash: transactionId,
+                hash: result.boc,
                 fromChain: sourceChain!.id,
                 toChain: targetChain!.id,
                 amount,
@@ -224,12 +208,9 @@ export function useBridge(): UseBridgeReturn {
 
             setPendingTransactions(prev => [...prev, newTransaction]);
             savePendingTransactions([...pendingTransactions, newTransaction]);
-
-            // Reset form
             resetState();
 
-            return transactionId;
-
+            return result.boc;
         } catch (error) {
             console.error('Bridge failed:', error);
             setError(error instanceof Error ? error.message : 'Bridge failed. Please try again.');
@@ -239,101 +220,17 @@ export function useBridge(): UseBridgeReturn {
         }
     };
 
-    const estimateFees = async (): Promise<BridgeFees> => {
-        try {
-            if (!amount || !sourceChain || !targetChain) {
-                throw new Error('Invalid parameters for fee estimation');
-            }
-
-            // Get base fee from contract
-            const baseFee = await client.callGetMethod(
-                Address.parse(process.env.NEXT_PUBLIC_BRIDGE_ADDRESS!),
-                'get_base_fee',
-                []
-            );
-
-            // Calculate percentage fee (0.3%)
-            const percentageFee = new BigNumber(amount).multipliedBy(0.003);
-
-            // Estimate gas
-            const gasEstimate = toNano('0.1'); // Default gas estimate
-
-            return {
-                baseFee: fromNano(baseFee.stack.readBigNumber()),
-                percentageFee: percentageFee.toString(),
-                totalFee: percentageFee.plus(fromNano(baseFee.stack.readBigNumber())).toString(),
-                gasEstimate: fromNano(gasEstimate)
-            };
-        } catch (error) {
-            console.error('Fee estimation failed:', error);
-            throw new Error('Failed to estimate fees');
-        }
-    };
-
-    const getTransactionStatus = async (hash: string): Promise<BridgeTransaction> => {
-        try {
-            // Get transaction status from bridge contract
-            const status = await client.callGetMethod(
-                Address.parse(process.env.NEXT_PUBLIC_BRIDGE_ADDRESS!),
-                'get_transfer_status',
-                [{ type: 'slice', cell: beginCell().storeBuffer(Buffer.from(hash, 'hex')).endCell() }]
-            );
-
-            const tx = pendingTransactions.find(t => t.hash === hash);
-            if (!tx) throw new Error('Transaction not found');
-
-            const confirmations = status.stack.readNumber();
-            const isCompleted = status.stack.readBoolean();
-            const isFailed = status.stack.readBoolean();
-
-            return {
-                ...tx,
-                confirmations,
-                status: isFailed ? 'failed' : isCompleted ? 'completed' : 'confirming',
-            };
-
-        } catch (error) {
-            console.error('Failed to get transaction status:', error);
-            throw error;
-        }
-    };
-
-    const validateBridge = (): string | null => {
-        if (!connected) return 'Wallet not connected';
-        if (!sourceChain) return 'Select source chain';
-        if (!targetChain) return 'Select target chain';
-        if (!amount || isNaN(Number(amount))) return 'Enter amount';
-
-        const numAmount = Number(amount);
-        if (numAmount <= 0) return 'Invalid amount';
-        if (numAmount < Number(sourceChain.minAmount)) return `Minimum amount is ${sourceChain.minAmount} ${sourceChain.nativeToken}`;
-        if (numAmount > Number(sourceChain.maxAmount)) return `Maximum amount is ${sourceChain.maxAmount} ${sourceChain.nativeToken}`;
-
-        return null;
-    };
-
-    const switchChains = useCallback(() => {
-        setSourceChain(targetChain);
-        setTargetChain(sourceChain);
-    }, [sourceChain, targetChain]);
-
-    const resetState = useCallback(() => {
-        setAmount('');
-        setError(null);
-    }, []);
-
-    const getRequiredConfirmations = (): number => {
-        // Different chains require different confirmation counts
-        switch (targetChain?.id) {
-            case 1: return 1;  // TON
-            case 2: return 12; // ETH
-            case 3: return 5;  // BSC
-            default: return 1;
+    const decodeTransactionStatus = (status: number): BridgeTransaction['status'] => {
+        switch (status) {
+            case 0: return 'pending';
+            case 1: return 'confirming';
+            case 2: return 'completed';
+            case 3: return 'failed';
+            default: return 'pending';
         }
     };
 
     return {
-        // States
         sourceChain,
         setSourceChain,
         targetChain,
@@ -342,18 +239,14 @@ export function useBridge(): UseBridgeReturn {
         setAmount,
         loading,
         error,
-
-        // Bridge operations
         executeBridge,
         estimateFees,
-
-        // Transaction management
         pendingTransactions,
         getTransactionStatus,
-
-        // Utils
         validateBridge,
         switchChains,
         resetState
     };
 }
+
+export default useBridge;

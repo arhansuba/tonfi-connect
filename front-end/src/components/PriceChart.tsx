@@ -33,6 +33,15 @@ interface PriceChartProps {
     height?: number;
 }
 
+// Time frames in milliseconds
+const TIME_FRAMES = {
+    '1H': 60 * 60 * 1000,
+    '24H': 24 * 60 * 60 * 1000,
+    '1W': 7 * 24 * 60 * 60 * 1000,
+    '1M': 30 * 24 * 60 * 60 * 1000,
+    'ALL': Infinity
+};
+
 export const PriceChart: React.FC<PriceChartProps> = ({
     tokenPair,
     className = '',
@@ -47,15 +56,6 @@ export const PriceChart: React.FC<PriceChartProps> = ({
         value: number;
         percentage: number;
     } | null>(null);
-
-    // Time frames in milliseconds
-    const TIME_FRAMES = {
-        '1H': 60 * 60 * 1000,
-        '24H': 24 * 60 * 60 * 1000,
-        '1W': 7 * 24 * 60 * 60 * 1000,
-        '1M': 30 * 24 * 60 * 60 * 1000,
-        'ALL': Infinity
-    };
 
     // Fetch price data
     useEffect(() => {

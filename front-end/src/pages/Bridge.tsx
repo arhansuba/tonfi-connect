@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { BridgeForm } from '../components/BridgeForm';
 import { PriceChart } from '../components/PriceChart';
 import { TokenSelect } from '../components/TokenSelect';
-import { useTonConnect } from '@tonconnect/ui-react';
+import { useTonConnectUI } from '@tonconnect/ui-react';
 import { 
     Tabs,
     TabsContent,
@@ -47,7 +47,7 @@ interface Transaction {
 }
 
 export const BridgePage: React.FC = () => {
-    const { connected, connector } = useTonConnect();
+    useTonConnectUI();
     const [activeTab, setActiveTab] = useState('bridge');
     const [transactions, setTransactions] = useState<Transaction[]>([]);
     const [showRiskDialog, setShowRiskDialog] = useState(true);

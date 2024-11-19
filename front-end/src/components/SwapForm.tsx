@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useSwap } from '../../hooks/useSwap';
+import { useSwap } from '../hooks/useSwap';
 import { Address } from '@ton/core';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowDown, Settings, AlertCircle, ArrowRightLeft } from 'lucide-react';
@@ -25,13 +25,14 @@ import {
 } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { useTonConnect } from '@tonconnect/ui-react';
+import { useTonConnectUI, TonConnect } from '@tonconnect/ui-react';
 
 interface Token {
     symbol: string;
     address: string;
     icon: string;
     decimals: number;
+    balance?: string;
 }
 
 const TOKENS: Token[] = [
@@ -41,7 +42,8 @@ const TOKENS: Token[] = [
 ];
 
 export const SwapForm: React.FC = () => {
-    const { connected, connector } = useTonConnect();
+    const [tonConnectUI, setTonConnectUI] = useTonConnectUI();
+    const { connected, connector } = tonConnectUI;
     const {
         inputAmount,
         setInputAmount,
@@ -58,7 +60,23 @@ export const SwapForm: React.FC = () => {
         getQuote,
         switchTokens,
         validateSwap,
-    } = useSwap();
+    } = useSwap() as {
+        inputAmount: string;
+        setInputAmount: (amount: string) => void;
+        outputAmount: string;
+        tokenIn: Token | null;
+        setTokenIn: (token: Token | null) => void;
+        tokenOut: Token | null;
+        setTokenOut: (token: Token | null) => void;
+        settings: any;
+        updateSettings: (settings: any) => void;
+        loading: boolean;
+        error: string | null;
+        executeSwap: () => Promise<void>;
+        getQuote: () => Promise<any>;
+        switchTokens: () => void;
+        validateSwap: () => string | null;
+    };
 
     const [showSettings, setShowSettings] = useState(false);
     const [priceImpact, setPriceImpact] = useState<number>(0);
@@ -81,14 +99,26 @@ export const SwapForm: React.FC = () => {
     const handleSwap = async () => {
         try {
             if (!connected) {
-                await connector.connect();
+                await connector.connect({ jsBridgeKey: 'your-js-bridge-key' });
                 return;
             }
             await executeSwap();
             // Show success message using Telegram Mini App native UI
-            Telegram.WebApp.showAlert('Swap executed successfully!');
+            if (window.Telegram && window.Telegram.WebApp) {
+                window.Telegram.WebApp.showAlert('Swap executed successfully!');
+            if (window.Telegram && window.Telegram.WebApp) {
+                window.Telegram.WebApp.showAlert('Swap failed. Please try again.');
+            } else {
+                alert('Swap failed. Please try again.');
+            }
+                alert('Swap executed successfully!');
+            }
         } catch (error) {
-            Telegram.WebApp.showAlert('Swap failed. Please try again.');
+            if (window.Telegram && window.Telegram.WebApp) {
+                window.Telegram.WebApp.showAlert('Swap failed. Please try again.');
+            } else {
+                alert('Swap failed. Please try again.');
+            }
         }
     };
 
@@ -159,7 +189,7 @@ export const SwapForm: React.FC = () => {
 
                 {/* Price Impact Warning */}
                 {priceImpact > 2 && (
-                    <Alert variant={priceImpact > 5 ? "destructive" : "warning"}>
+                    <Alert variant={priceImpact > 5 ? "destructive" : "default"}>
                         <AlertCircle className="h-4 w-4" />
                         <AlertTitle>Price Impact Warning</AlertTitle>
                         <AlertDescription>
