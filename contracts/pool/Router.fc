@@ -1,267 +1,142 @@
-#pragma version >=0.2.0;
-
-;; ============================================================================
-;;
-;; Router Contract for TON AMM
-;; Handles optimal path finding and multi-hop swaps
-;;
-;; ============================================================================
+#pragma version ^0.2.0;
 
 ;; Storage Variables
-global cell ctx_pools;  ;; Dictionary of pool addresses
-global cell ctx_tokens; ;; Dictionary of supported tokens
-global int const::WTON_ID = 0; ;; ID for wrapped TON
+global cell pools_dict;  
+global cell tokens_dict;
+const int WTON_ID = 0;
 
-;; Error Codes
-const int error::pool_not_found = 201;
-const int error::invalid_path = 202;
-const int error::insufficient_output = 203;
-const int error::no_path_found = 204;
+;; Error codes
+const int error_pool_not_found = 201;
+const int error_invalid_path = 202;
+const int error_insufficient_output = 203;
+const int error_no_path = 204;
 
-;; Operation Codes
-const int op::swap = 1;
-const int op::swap_exact_tokens = 2;
-const int op::add_pool = 3;
-const int op::remove_pool = 4;
-
-;; ============================================================================
-;;
-;; Data Structures & Storage
-;;
-;; ============================================================================
+;; Operation codes
+const int op_swap = 1;
+const int op_swap_exact = 2;
+const int op_add_pool = 3;
+const int op_remove_pool = 4;
 
 () load_data() impure {
-    var ds = get_data().begin_parse();
-    ctx_pools = ds~load_dict();
-    ctx_tokens = ds~load_dict();
-    ds.end_parse();
+    slice ds = get_data().begin_parse();
+    pools_dict = ds~load_dict();
+    tokens_dict = ds~load_dict();
 }
 
 () save_data() impure {
     set_data(begin_cell()
-        .store_dict(ctx_pools)
-        .store_dict(ctx_tokens)
+        .store_dict(pools_dict)
+        .store_dict(tokens_dict)
         .end_cell());
 }
 
-slice get_pool_address(int token0, int token1) inline {
-    int pool_key = (min(token0, token1) << 128) + max(token0, token1);
-    (slice addr, int found?) = ctx_pools.udict_get?(256, pool_key);
-    throw_unless(error::pool_not_found, found?);
+slice get_pool_addr(int token0, int token1) inline {
+    int key = (min(token0, token1) << 128) | max(token0, token1);
+    (slice addr, int found) = pools_dict.udict_get?(256, key);
+    throw_unless(error_pool_not_found, found);
     return addr;
 }
 
-;; ============================================================================
-;;
-;; Path Finding Logic
-;;
-;; ============================================================================
-
-(int, cell) calculate_direct_swap(int token_in, int token_out, int amount_in) inline {
-    ;; Get pool address
-    slice pool_addr = get_pool_address(token_in, token_out);
+;; Path finding
+(int, cell) calc_direct_swap(int token_in, int token_out, int amount) inline {
+    slice pool = get_pool_addr(token_in, token_out);
     
-    ;; Get pool reserves
-    var (reserve_in, reserve_out) = get_pool_reserves(pool_addr, token_in, token_out);
+    ;; Get reserves from pool
+    (int reserve_in, int reserve_out) = get_reserves(pool, token_in, token_out);
     
     ;; Calculate output
-    int output = calculate_output_amount(amount_in, reserve_in, reserve_out);
+    int out_amount = calc_out_amount(amount, reserve_in, reserve_out);
     
-    ;; Pack path
     cell path = begin_cell()
-        .store_uint(token_in, 32)
+        .store_uint(token_in, 32) 
         .store_uint(token_out, 32)
-        .store_slice(pool_addr)
+        .store_slice(pool)
         .end_cell();
         
-    return (output, path);
+    return (out_amount, path);
 }
 
-(int, cell) calculate_path_through_wton(int token_in, int token_out, int amount_in) inline {
-    if (token_in == const::WTON_ID || token_out == const::WTON_ID) {
-        return (0, null()); ;; Skip if one of tokens is WTON
+(int, cell) calc_wton_path(int token_in, int token_out, int amount) inline {
+    if ((token_in == WTON_ID) | (token_out == WTON_ID)) {
+        return (0, null());
     }
     
-    ;; Get pool addresses
-    slice pool1_addr = get_pool_address(token_in, const::WTON_ID);
-    slice pool2_addr = get_pool_address(const::WTON_ID, token_out);
+    ;; Get pools
+    slice pool1 = get_pool_addr(token_in, WTON_ID);
+    slice pool2 = get_pool_addr(WTON_ID, token_out);
     
-    ;; Calculate first swap (token -> WTON)
-    var (reserve1_in, reserve1_out) = get_pool_reserves(pool1_addr, token_in, const::WTON_ID);
-    int wton_amount = calculate_output_amount(amount_in, reserve1_in, reserve1_out);
+    ;; Swap calculations
+    (int r1_in, int r1_out) = get_reserves(pool1, token_in, WTON_ID);
+    int wton_amount = calc_out_amount(amount, r1_in, r1_out);
     
-    ;; Calculate second swap (WTON -> token)
-    var (reserve2_in, reserve2_out) = get_pool_reserves(pool2_addr, const::WTON_ID, token_out);
-    int output = calculate_output_amount(wton_amount, reserve2_in, reserve2_out);
+    (int r2_in, int r2_out) = get_reserves(pool2, WTON_ID, token_out);
+    int out_amount = calc_out_amount(wton_amount, r2_in, r2_out);
     
-    ;; Pack path
     cell path = begin_cell()
         .store_uint(token_in, 32)
-        .store_uint(const::WTON_ID, 32)
-        .store_slice(pool1_addr)
+        .store_uint(WTON_ID, 32)
+        .store_slice(pool1)
         .store_uint(token_out, 32)
-        .store_slice(pool2_addr)
+        .store_slice(pool2)
         .end_cell();
         
-    return (output, path);
+    return (out_amount, path);
 }
 
-(cell) find_best_path(int token_in, int token_out, int amount_in) method_id {
+() execute_swap(slice msg, cell path) impure {
+    int amount = msg~load_coins();
+    int min_out = msg~load_coins();
+    slice sender = msg~load_msg_addr();
+    
+    slice ps = path.begin_parse();
+    while (ps.slice_bits() > 0) {
+        int token_in = ps~load_uint(32);
+        int token_out = ps~load_uint(32);
+        slice pool = ps~load_msg_addr();
+        
+        ;; Send swap to pool
+        send_raw_message(begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(pool)
+            .store_coins(amount)
+            .store_uint(0, 107)
+            .store_uint(op_swap, 32)
+            .store_uint(token_in, 32)
+            .store_uint(token_out, 32)
+            .store_slice(sender)
+            .end_cell(), 64);
+    }
+}
+
+;; Get methods
+cell find_best_path(int token_in, int token_out, int amount) method_id {
     load_data();
     
-    ;; Calculate direct path
-    var (direct_output, direct_path) = calculate_direct_swap(token_in, token_out, amount_in);
+    ;; Compare direct vs WTON path
+    (int direct_out, cell direct_path) = calc_direct_swap(token_in, token_out, amount);
+    (int wton_out, cell wton_path) = calc_wton_path(token_in, token_out, amount);
     
-    ;; Calculate WTON path
-    var (wton_output, wton_path) = calculate_path_through_wton(token_in, token_out, amount_in);
-    
-    ;; Return best path
-    if (direct_output >= wton_output) {
+    if (direct_out >= wton_out) {
         return direct_path;
     } else {
         return wton_path;
     }
 }
 
-;; ============================================================================
-;;
-;; Swap Execution
-;;
-;; ============================================================================
-
-() execute_swap_step(slice msg, int token_in, int token_out, slice pool_addr, int amount_in, int min_out) impure {
-    ;; Prepare swap message
-    var swap_msg = begin_cell()
-        .store_uint(op::swap, 32)
-        .store_uint(token_in, 32)
-        .store_uint(token_out, 32)
-        .store_coins(amount_in)
-        .store_coins(min_out)
-        .store_slice(msg.sender_address())
-        .end_cell();
-        
-    ;; Send message to pool
-    send_raw_message(begin_cell()
-        .store_uint(0x18, 6)
-        .store_slice(pool_addr)
-        .store_coins(0)
-        .store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1)
-        .store_ref(swap_msg)
-        .end_cell(), 64);
-}
-
-() execute_multi_hop_swap(slice msg) impure {
-    int amount_in = msg~load_coins();
-    int token_in = msg~load_uint(32);
-    int token_out = msg~load_uint(32);
-    int min_out = msg~load_coins();
-    
-    ;; Find best path
-    cell path = find_best_path(token_in, token_out, amount_in);
-    throw_if(error::no_path_found, path.null?());
-    
-    slice path_slice = path.begin_parse();
-    
-    ;; Execute swaps along path
-    int current_amount = amount_in;
-    int current_token = token_in;
-    
-    while (path_slice.slice_bits() > 0) {
-        int next_token = path_slice~load_uint(32);
-        slice pool_addr = path_slice~load_msg_addr();
-        
-        ;; Calculate minimum output for this step
-        int step_min_out = (next_token == token_out) ? min_out : 0;
-        
-        ;; Execute swap step
-        execute_swap_step(msg, current_token, next_token, pool_addr, current_amount, step_min_out);
-        
-        current_token = next_token;
-    }
-}
-
-;; ============================================================================
-;;
-;; Pool Management
-;;
-;; ============================================================================
-
-() add_pool(slice msg) impure {
-    int token0 = msg~load_uint(32);
-    int token1 = msg~load_uint(32);
-    slice pool_addr = msg~load_msg_addr();
-    
-    ;; Add pool to dictionary
-    int pool_key = (min(token0, token1) << 128) + max(token0, token1);
-    ctx_pools~udict_set(256, pool_key, begin_cell().store_slice(pool_addr).end_cell());
-    
-    save_data();
-}
-
-() remove_pool(slice msg) impure {
-    int token0 = msg~load_uint(32);
-    int token1 = msg~load_uint(32);
-    
-    ;; Remove pool from dictionary
-    int pool_key = (min(token0, token1) << 128) + max(token0, token1);
-    ctx_pools~udict_delete?(256, pool_key);
-    
-    save_data();
-}
-
-;; ============================================================================
-;;
-;; Get Methods
-;;
-;; ============================================================================
-
-(int, cell) get_best_path_info(int token_in, int token_out, int amount_in) method_id {
-    load_data();
-    
-    var (direct_output, direct_path) = calculate_direct_swap(token_in, token_out, amount_in);
-    var (wton_output, wton_path) = calculate_path_through_wton(token_in, token_out, amount_in);
-    
-    if (direct_output >= wton_output) {
-        return (direct_output, direct_path);
-    } else {
-        return (wton_output, wton_path);
-    }
-}
-
-slice get_pool(int token0, int token1) method_id {
-    load_data();
-    return get_pool_address(token0, token1);
-}
-
-;; ============================================================================
-;;
-;; Main Entry Points
-;;
-;; ============================================================================
-
 () recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
     if (in_msg_body.slice_empty?()) { return (); }
     
     slice cs = in_msg_full.begin_parse();
-    cs~load_uint(4);  ;; skip flags
-    slice sender_address = cs~load_msg_addr();
+    cs~load_uint(4);
+    slice sender = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
     
     load_data();
     
-    int op = in_msg_body~load_uint(32);
-    
-    if (op == op::swap) {
-        execute_multi_hop_swap(in_msg_body);
-    } elseif (op == op::add_pool) {
-        add_pool(in_msg_body);
-    } elseif (op == op::remove_pool) {
-        remove_pool(in_msg_body);
+    if (op == op_swap) {
+        cell path = find_best_path(msg~load_uint(32), msg~load_uint(32), msg~load_coins());
+        execute_swap(msg, path);
     }
     
     save_data();
-}
-
-() recv_external(slice in_msg) impure {
-    ;; Handle external messages if needed
-    return ();
 }

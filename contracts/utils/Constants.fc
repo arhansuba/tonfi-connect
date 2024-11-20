@@ -227,10 +227,7 @@ int from_basis_points(int basis_points) inline {
     return basis_points / 100;
 }
 
-;; Check if amount is within bridge limits
-int is_valid_bridge_amount(int amount) inline {
-    return amount >= MIN_BRIDGE_AMOUNT & amount <= MAX_BRIDGE_AMOUNT;
-}
+;; Calculate protocol fee
 
 ;; Calculate bridge fee
 int calculate_bridge_fee(int amount) inline {

@@ -47,11 +47,15 @@ interface SwapTransaction {
 }
 
 export const SwapPage: React.FC = () => {
-    const [tonConnectUI, setTonConnectUI] = useTonConnectUI();
-    const { connected, wallet } = tonConnectUI;
+    const [tonConnectUI] = useTonConnectUI();
     const [activeTab, setActiveTab] = useState('swap');
     const [showSettings, setShowSettings] = useState(false);
     const [transactions, setTransactions] = useState<SwapTransaction[]>([]);
+    
+    // Get wallet address safely
+    const walletAddress = tonConnectUI.account?.address || '';
+    const isConnected = !!tonConnectUI.account;
+
     const [marketStats, setMarketStats] = useState({
         volumeLast24h: '$1,234,567',
         trades24h: '1,234',
@@ -59,7 +63,6 @@ export const SwapPage: React.FC = () => {
         avgSlippage: '0.2%'
     });
 
-    // Pool statistics for selected pair
     const [poolStats, setPoolStats] = useState({
         tvl: '$1,234,567',
         volume24h: '$123,456',
@@ -67,15 +70,16 @@ export const SwapPage: React.FC = () => {
         apr: '12.34%'
     });
 
+
     // Load transactions from local storage
     useEffect(() => {
-        if (connected) {
-            const storedTx = localStorage.getItem(`swap_transactions_${tonConnectUI.address}`);
+        if (isConnected && walletAddress) {
+            const storedTx = localStorage.getItem(`swap_transactions_${walletAddress}`);
             if (storedTx) {
                 setTransactions(JSON.parse(storedTx));
             }
         }
-    }, [connected, wallet?.address]);
+    }, [isConnected, walletAddress]);
 
     return (
         <div className="container mx-auto p-4 space-y-6 max-w-4xl">

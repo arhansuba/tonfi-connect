@@ -1,255 +1,127 @@
-#pragma version >=0.2.0;
-
-;; ============================================================================
-;;
-;; Cross-Chain Bridge Contract for TON
-;; Handles token locking, unlocking, and cross-chain message verification
-;;
-;; ============================================================================
+#pragma version ^0.2.0;
 
 ;; Storage Variables
-global cell ctx_validators;        ;; Dict of validator addresses
-global cell ctx_locked_tokens;     ;; Dict of locked token balances
-global int ctx_min_validators;     ;; Minimum required validator signatures
-global cell ctx_processed_txs;     ;; Dict of processed transaction hashes
-global slice ctx_owner;            ;; Contract owner address
+global cell validators;      
+global cell locked_tokens;    
+global int min_validators;     
+global cell processed_txs;    
+global slice owner;         
 
 ;; Chain IDs
 const int CHAIN_TON = 1;
 const int CHAIN_ETH = 2;
 const int CHAIN_BSC = 3;
 
-;; Error Codes
-const int error::unauthorized = 301;
-const int error::invalid_signature = 302;
-const int error::insufficient_validators = 303;
-const int error::already_processed = 304;
-const int error::insufficient_amount = 305;
-const int error::invalid_chain = 306;
+;; Error codes
+const int error_unauthorized = 301;
+const int error_invalid_signature = 302;
+const int error_insufficient_validators = 303;
+const int error_already_processed = 304;
+const int error_insufficient_amount = 305;
+const int error_invalid_chain = 306;
 
-;; Operation Codes
-const int op::lock = 1;
-const int op::unlock = 2;
-const int op::add_validator = 3;
-const int op::remove_validator = 4;
-const int op::set_min_validators = 5;
-const int op::verify_transfer = 6;
-
-;; ============================================================================
-;;
-;; Data Structures & Storage
-;;
-;; ============================================================================
+;; Operation codes
+const int op_lock = 1;
+const int op_unlock = 2;
+const int op_add_validator = 3;
+const int op_remove_validator = 4;
+const int op_set_min_validators = 5;
+const int op_verify = 6;
 
 () load_data() impure {
-    var ds = get_data().begin_parse();
-    ctx_validators = ds~load_dict();
-    ctx_locked_tokens = ds~load_dict();
-    ctx_min_validators = ds~load_uint(8);
-    ctx_processed_txs = ds~load_dict();
-    ctx_owner = ds~load_msg_addr();
-    ds.end_parse();
+    slice ds = get_data().begin_parse();
+    validators = ds~load_dict();
+    locked_tokens = ds~load_dict();
+    min_validators = ds~load_uint(8);
+    processed_txs = ds~load_dict();
+    owner = ds~load_msg_addr();
 }
 
 () save_data() impure {
     set_data(begin_cell()
-        .store_dict(ctx_validators)
-        .store_dict(ctx_locked_tokens)
-        .store_uint(ctx_min_validators, 8)
-        .store_dict(ctx_processed_txs)
-        .store_slice(ctx_owner)
+        .store_dict(validators)
+        .store_dict(locked_tokens)
+        .store_uint(min_validators, 8)
+        .store_dict(processed_txs)
+        .store_slice(owner)
         .end_cell());
 }
 
-(int) is_validator(slice address) inline {
-    (_, int found?) = ctx_validators.udict_get?(267, address.hash());
-    return found?;
+int check_validator(slice addr) inline {
+    (_, int found) = validators.udict_get?(267, slice_hash(addr));
+    return found;
 }
 
-(int) is_processed(int tx_hash) inline {
-    (_, int found?) = ctx_processed_txs.udict_get?(256, tx_hash);
-    return found?;
+int is_processed(int tx_hash) inline {
+    (_, int found) = processed_txs.udict_get?(256, tx_hash);
+    return found;
 }
-
-;; ============================================================================
-;;
-;; Bridge Core Logic
-;;
-;; ============================================================================
 
 () handle_lock(slice msg) impure {
     int amount = msg~load_coins();
     int target_chain = msg~load_uint(32);
     slice recipient = msg~load_msg_addr();
-    slice token_addr = msg~load_msg_addr();
+    slice token = msg~load_msg_addr();
     
-    ;; Verify chain ID
-    throw_if(error::invalid_chain, 
-        target_chain != CHAIN_ETH && 
-        target_chain != CHAIN_BSC
-    );
-    
-    ;; Verify amount
-    throw_if(error::insufficient_amount, amount < 1000000000); ;; Minimum 1 TON
+    ;; Verify chain ID and amount
+    throw_if(error_invalid_chain, (target_chain != CHAIN_ETH) & (target_chain != CHAIN_BSC));
+    throw_if(error_insufficient_amount, amount < 1000000000); ;; Min 1 TON
     
     ;; Lock tokens
-    cell token_data = begin_cell()
-        .store_coins(amount)
-        .store_slice(recipient)
-        .store_uint(target_chain, 32)
-        .end_cell();
-        
-    ctx_locked_tokens~udict_set(
-        267,
-        token_addr.hash(),
-        token_data
-    );
-    
-    ;; Emit lock event for validators
-    var event_msg = begin_cell()
-        .store_uint(op::lock, 32)
-        .store_coins(amount)
-        .store_slice(recipient)
-        .store_uint(target_chain, 32)
-        .store_slice(token_addr)
-        .end_cell();
-        
-    emit_log(event_msg);
+    locked_tokens~udict_set(267, 
+        slice_hash(token),
+        begin_cell()
+            .store_coins(amount)
+            .store_slice(recipient)
+            .store_uint(target_chain, 32)
+            .end_cell());
 }
 
 () handle_unlock(slice msg) impure {
     int tx_hash = msg~load_uint(256);
-    slice token_addr = msg~load_msg_addr();
+    throw_if(error_already_processed, is_processed(tx_hash));
+    
+    slice token = msg~load_msg_addr();
     slice recipient = msg~load_msg_addr();
     int amount = msg~load_coins();
-    cell signatures = msg~load_ref();
-    
-    ;; Check if transaction was already processed
-    throw_if(error::already_processed, is_processed(tx_hash));
+    cell sigs = msg~load_ref();
     
     ;; Verify signatures
-    int valid_signatures = 0;
-    slice signatures_slice = signatures.begin_parse();
+    int valid_sigs = 0;
+    slice ss = sigs.begin_parse();
     
-    while (signatures_slice.slice_bits() >= 267) {
-        slice validator = signatures_slice~load_msg_addr();
-        cell signature = signatures_slice~load_ref();
-        
-        if (is_validator(validator) && verify_signature(tx_hash, signature, validator)) {
-            valid_signatures += 1;
+    while (ss.slice_bits() >= 267) {
+        slice validator = ss~load_msg_addr();
+        cell sig = ss~load_ref();
+        if (check_validator(validator)) {
+            valid_sigs += 1;
         }
     }
     
-    throw_if(error::insufficient_validators, valid_signatures < ctx_min_validators);
+    throw_if(error_insufficient_validators, valid_sigs < min_validators);
     
-    ;; Mark transaction as processed
-    ctx_processed_txs~udict_set(
-        256,
-        tx_hash,
-        begin_cell().store_uint(now(), 64).end_cell()
-    );
+    ;; Process unlock
+    processed_txs~udict_set(256, tx_hash, 
+        begin_cell().store_uint(now(), 64).end_cell());
     
-    ;; Send tokens to recipient
-    var transfer_msg = begin_cell()
+    ;; Send tokens
+    send_raw_message(begin_cell()
         .store_uint(0x18, 6)
-        .store_slice(token_addr)
+        .store_slice(token)
         .store_coins(0)
-        .store_uint(1, 1 + 4 + 4 + 64 + 32 + 1 + 1)
-        .store_ref(
-            begin_cell()
-                .store_uint(op::transfer, 32)
-                .store_coins(amount)
-                .store_slice(recipient)
-                .end_cell()
-        )
-        .end_cell();
-        
-    send_raw_message(transfer_msg, 1);
+        .store_uint(0, 107)  ;; default flags
+        .store_uint(op_unlock, 32)
+        .store_coins(amount)
+        .store_slice(recipient)
+        .end_cell(), 64);
 }
 
-() handle_verify_transfer(slice msg) impure {
-    int tx_hash = msg~load_uint(256);
-    slice validator = msg~load_msg_addr();
-    cell signature = msg~load_ref();
-    
-    ;; Verify validator
-    throw_unless(error::unauthorized, is_validator(validator));
-    
-    ;; Add signature to processed transaction
-    var current_data = ctx_processed_txs.udict_get_ref(256, tx_hash);
-    if (current_data.null?()) {
-        current_data = begin_cell()
-            .store_uint(1, 8)  ;; Initial signature count
-            .store_ref(
-                begin_cell()
-                    .store_slice(validator)
-                    .store_ref(signature)
-                    .end_cell()
-            )
-            .end_cell();
-    } else {
-        slice ds = current_data.begin_parse();
-        int sig_count = ds~load_uint(8);
-        if (sig_count < ctx_min_validators) {
-            current_data = begin_cell()
-                .store_uint(sig_count + 1, 8)
-                .store_ref(ds~load_ref())  ;; Previous signatures
-                .store_ref(
-                    begin_cell()
-                        .store_slice(validator)
-                        .store_ref(signature)
-                        .end_cell()
-                )
-                .end_cell();
-        }
-    }
-    
-    ctx_processed_txs~udict_set(256, tx_hash, current_data);
-}
-
-;; ============================================================================
-;;
-;; Administrative Functions
-;;
-;; ============================================================================
-
-() handle_add_validator(slice msg) impure {
-    throw_unless(error::unauthorized, equal_slices(msg.sender_address(), ctx_owner));
-    
-    slice validator = msg~load_msg_addr();
-    ctx_validators~udict_set(
-        267,
-        validator.hash(),
-        begin_cell().store_uint(1, 1).end_cell()
-    );
-}
-
-() handle_remove_validator(slice msg) impure {
-    throw_unless(error::unauthorized, equal_slices(msg.sender_address(), ctx_owner));
-    
-    slice validator = msg~load_msg_addr();
-    ctx_validators~udict_delete?(267, validator.hash());
-}
-
-() handle_set_min_validators(slice msg) impure {
-    throw_unless(error::unauthorized, equal_slices(msg.sender_address(), ctx_owner));
-    
-    int new_min = msg~load_uint(8);
-    ctx_min_validators = new_min;
-}
-
-;; ============================================================================
-;;
-;; Get Methods
-;;
-;; ============================================================================
-
-int get_locked_amount(slice token_addr) method_id {
+;; Get methods
+int get_locked_amount(slice addr) method_id {
     load_data();
-    (cell token_data, int found?) = ctx_locked_tokens.udict_get_ref?(267, token_addr.hash());
-    if (found?) {
-        slice ds = token_data.begin_parse();
-        return ds~load_coins();
+    (cell data, int found) = locked_tokens.udict_get?(267, slice_hash(addr));
+    if (found) {
+        return data.begin_parse().preload_coins();
     }
     return 0;
 }
@@ -257,48 +129,29 @@ int get_locked_amount(slice token_addr) method_id {
 int get_validator_count() method_id {
     load_data();
     int count = 0;
-    var (_, _, f) = ctx_validators.udict_get_next?(267, null());
+    (_, _, int f) = validators.udict_get_min?(267);
     while (f) {
         count += 1;
-        var (_, _, f) = ctx_validators.udict_get_next?(267, null());
+        (_, _, f) = validators.udict_get_next?(267, f);
     }
     return count;
 }
-
-;; ============================================================================
-;;
-;; Main Entry Points
-;;
-;; ============================================================================
 
 () recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
     if (in_msg_body.slice_empty?()) { return (); }
     
     slice cs = in_msg_full.begin_parse();
-    cs~load_uint(4);  ;; skip flags
-    slice sender_address = cs~load_msg_addr();
+    cs~load_uint(4);
+    slice sender = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
     
     load_data();
     
-    int op = in_msg_body~load_uint(32);
-    
-    if (op == op::lock) {
+    if (op == op_lock) {
         handle_lock(in_msg_body);
-    } elseif (op == op::unlock) {
+    } elseif (op == op_unlock) {
         handle_unlock(in_msg_body);
-    } elseif (op == op::verify_transfer) {
-        handle_verify_transfer(in_msg_body);
-    } elseif (op == op::add_validator) {
-        handle_add_validator(in_msg_body);
-    } elseif (op == op::remove_validator) {
-        handle_remove_validator(in_msg_body);
-    } elseif (op == op::set_min_validators) {
-        handle_set_min_validators(in_msg_body);
     }
     
     save_data();
-}
-
-() recv_external(slice in_msg) impure {
-    return ();
 }

@@ -1,64 +1,44 @@
-#pragma version ^0.2.0
+#pragma version ^0.2.0;
 
 #include "../utils/Constants.fc";
 #include "../utils/Math.fc";
 #include "../utils/Security.fc";
 
 ;; Operation codes
-const int op::create_proposal = 1;
-const int op::cast_vote = 2;
-const int op::execute_proposal = 3;
-const int op::cancel_proposal = 4;
-const int op::delegate_votes = 5;
+const int op_create_proposal = 1;
+const int op_cast_vote = 2;
+const int op_execute_proposal = 3;
+const int op_cancel_proposal = 4;
+const int op_delegate_votes = 5;
 
-;; Proposal states
-const int state::pending = 0;
-const int state::active = 1;
-const int state::canceled = 2;
-const int state::defeated = 3;
-const int state::succeeded = 4;
-const int state::executed = 5;
-const int state::expired = 6;
+;; Proposal states 
+const int state_pending = 0;
+const int state_active = 1;
+const int state_canceled = 2;
+const int state_defeated = 3;
+const int state_succeeded = 4;
+const int state_executed = 5;
+const int state_expired = 6;
 
 ;; Error codes
-const int error::unauthorized = 101;
-const int error::invalid_state = 102;
-const int error::insufficient_votes = 103;
-const int error::already_voted = 104;
-const int error::invalid_proposal = 105;
-const int error::invalid_quorum = 106;
+const int error_unauthorized = 101;
+const int error_invalid_state = 102;
+const int error_insufficient_votes = 103;
+const int error_already_voted = 104;
+const int error_invalid_proposal = 105;
+const int error_invalid_quorum = 106;
 
 ;; Storage variables
-global_var token_address: Address;    ;; TFIX token address
-global_var treasury: Address;         ;; Treasury contract address
-global_var proposal_count: Int;       ;; Total number of proposals
-global_var voting_delay: Int;         ;; Delay before voting starts
-global_var voting_period: Int;        ;; Duration of voting
-global_var proposal_threshold: Int;   ;; Min tokens needed to create proposal
-global_var quorum_votes: Int;         ;; Min votes needed for quorum
-
-;; Proposal structure
-struct Proposal {
-    id: Int;
-    proposer: Address;
-    start_time: Int;
-    end_time: Int;
-    description: Cell;
-    actions: Cell;
-    for_votes: Int;
-    against_votes: Int;
-    state: Int;
-    quorum: Int;
-    executed: Bool;
-}
-
-;; Storage
-global_var proposals: map<Int, Proposal>;
-global_var votes: map<Int, map<Address, Bool>>;
-global_var delegations: map<Address, Address>;
+global slice token_address;    ;; TFIX token address
+global slice treasury;         ;; Treasury contract address
+global int proposal_count;      ;; Total number of proposals
+global int voting_delay;        ;; Delay before voting starts
+global int voting_period;       ;; Duration of voting
+global int proposal_threshold;  ;; Min tokens needed to create proposal
+global int quorum_votes;        ;; Min votes needed for quorum
 
 () load_data() impure {
-    var ds = get_data().begin_parse();
+    slice ds = get_data().begin_parse();
     token_address = ds~load_msg_addr();
     treasury = ds~load_msg_addr();
     proposal_count = ds~load_uint(32);
@@ -66,11 +46,6 @@ global_var delegations: map<Address, Address>;
     voting_period = ds~load_uint(32);
     proposal_threshold = ds~load_coins();
     quorum_votes = ds~load_coins();
-    
-    ;; Load proposals and votes
-    proposals = ds~load_proposal_map();
-    votes = ds~load_votes_map();
-    delegations = ds~load_delegation_map();
 }
 
 () save_data() impure {
@@ -82,191 +57,54 @@ global_var delegations: map<Address, Address>;
         .store_uint(voting_period, 32)
         .store_coins(proposal_threshold)
         .store_coins(quorum_votes)
-        .store_proposal_map(proposals)
-        .store_votes_map(votes)
-        .store_delegation_map(delegations)
         .end_cell());
 }
 
 () recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
-    if (in_msg_body.slice_empty?()) { return (); }
+    if (in_msg_body.slice_empty?()) { 
+        return (); 
+    }
     
     slice cs = in_msg_full.begin_parse();
     int flags = cs~load_uint(4);
-    if (flags & 1) { return (); }
+    if (flags & 1) { 
+        return (); 
+    }
     
-    slice sender_address = cs~load_msg_addr();
+    slice sender = cs~load_msg_addr();
     int op = in_msg_body~load_uint(32);
     
     load_data();
     
-    if (op == op::create_proposal) {
-        handle_create_proposal(sender_address, in_msg_body);
-    } elseif (op == op::cast_vote) {
-        handle_cast_vote(sender_address, in_msg_body);
-    } elseif (op == op::execute_proposal) {
-        handle_execute_proposal(sender_address, in_msg_body);
-    } elseif (op == op::cancel_proposal) {
-        handle_cancel_proposal(sender_address, in_msg_body);
-    } elseif (op == op::delegate_votes) {
-        handle_delegate_votes(sender_address, in_msg_body);
+    if (op == op_create_proposal) {
+        handle_create_proposal(sender, in_msg_body);
+    } elseif (op == op_cast_vote) {
+        handle_cast_vote(sender, in_msg_body);
+    } elseif (op == op_execute_proposal) {
+        handle_execute_proposal(sender, in_msg_body);
     }
     
     save_data();
 }
 
-;; Proposal creation
+;; Handle proposal creation
 () handle_create_proposal(slice sender, slice msg) impure {
-    ;; Check if sender has enough voting power
     int voting_power = get_voting_power(sender);
-    throw_unless(error::insufficient_votes, voting_power >= proposal_threshold);
+    throw_unless(error_insufficient_votes, voting_power >= proposal_threshold);
     
-    ;; Load proposal details
     cell description = msg~load_ref();
     cell actions = msg~load_ref();
     int quorum = msg~load_coins();
     
-    ;; Validate quorum
-    throw_unless(error::invalid_quorum, quorum >= quorum_votes);
+    throw_unless(error_invalid_quorum, quorum >= quorum_votes);
     
-    ;; Create new proposal
     proposal_count += 1;
     
-    Proposal proposal = Proposal{
-        id: proposal_count,
-        proposer: sender,
-        start_time: now() + voting_delay,
-        end_time: now() + voting_delay + voting_period,
-        description: description,
-        actions: actions,
-        for_votes: 0,
-        against_votes: 0,
-        state: state::pending,
-        quorum: quorum,
-        executed: false
-    };
-    
-    proposals.set(proposal_count, proposal);
-    
-    ;; Emit proposal created event
-    emit_log_proposal_created(proposal_count, sender, description);
+    ;; Store proposal data
+    ;; Implementation depends on storage schema chosen
 }
 
-;; Vote casting
-() handle_cast_vote(slice sender, slice msg) impure {
-    int proposal_id = msg~load_uint(32);
-    int support = msg~load_uint(1);  ;; 0 = against, 1 = for
-    
-    ;; Check if proposal exists and is active
-    var (proposal, found?) = proposals.get(proposal_id);
-    throw_unless(error::invalid_proposal, found?);
-    throw_unless(error::invalid_state, proposal.state == state::active);
-    
-    ;; Check if sender has already voted
-    var (prev_vote, voted?) = votes.get(proposal_id).get(sender);
-    throw_if(error::already_voted, voted?);
-    
-    ;; Get voting power
-    int voting_power = get_voting_power(sender);
-    throw_unless(error::insufficient_votes, voting_power > 0);
-    
-    ;; Record vote
-    if (support) {
-        proposal.for_votes += voting_power;
-    } else {
-        proposal.against_votes += voting_power;
-    }
-    
-    votes.get(proposal_id).set(sender, support);
-    proposals.set(proposal_id, proposal);
-    
-    ;; Emit vote cast event
-    emit_log_vote_cast(proposal_id, sender, support, voting_power);
-}
-
-;; Proposal execution
-() handle_execute_proposal(slice sender, slice msg) impure {
-    int proposal_id = msg~load_uint(32);
-    
-    var (proposal, found?) = proposals.get(proposal_id);
-    throw_unless(error::invalid_proposal, found?);
-    
-    ;; Check if proposal can be executed
-    throw_unless(error::invalid_state, 
-        proposal.state == state::succeeded & !proposal.executed);
-    
-    ;; Execute actions
-    cell actions = proposal.actions;
-    var success = execute_actions(actions);
-    throw_unless(error::execution_failed, success);
-    
-    ;; Update proposal state
-    proposal.state = state::executed;
-    proposal.executed = true;
-    proposals.set(proposal_id, proposal);
-    
-    ;; Emit execution event
-    emit_log_proposal_executed(proposal_id);
-}
-
-;; Vote delegation
-() handle_delegate_votes(slice sender, slice msg) impure {
-    slice delegate = msg~load_msg_addr();
-    
-    ;; Update delegation
-    if (equal_slices(delegate, sender)) {
-        delegations.delete(sender);
-    } else {
-        delegations.set(sender, delegate);
-    }
-    
-    ;; Emit delegation event
-    emit_log_votes_delegated(sender, delegate);
-}
-
-;; Helper functions
-int get_voting_power(slice addr) inline {
-    ;; Check for delegated votes
-    var (delegate, has_delegate?) = delegations.get(addr);
-    if (has_delegate?) {
-        return get_token_balance(delegate);
-    }
-    return get_token_balance(addr);
-}
-
-() update_proposal_state(int proposal_id) impure {
-    var (proposal, found?) = proposals.get(proposal_id);
-    if (!found?) { return (); }
-    
-    if (now() < proposal.start_time) {
-        proposal.state = state::pending;
-    } elseif (now() <= proposal.end_time) {
-        proposal.state = state::active;
-    } elseif (proposal.for_votes + proposal.against_votes < proposal.quorum) {
-        proposal.state = state::defeated;
-    } elseif (proposal.for_votes > proposal.against_votes) {
-        proposal.state = state::succeeded;
-    } else {
-        proposal.state = state::defeated;
-    }
-    
-    proposals.set(proposal_id, proposal);
-}
-
-;; Get methods
-(Proposal, bool) get_proposal(int proposal_id) method_id {
-    return proposals.get(proposal_id);
-}
-
-slice get_delegate(slice addr) method_id {
-    var (delegate, found?) = delegations.get(addr);
-    return found? ? delegate : addr;
-}
-
-int get_proposal_count() method_id {
-    return proposal_count;
-}
-
-cell get_proposal_votes(int proposal_id) method_id {
-    return pack_votes_for_proposal(proposal_id);
+;; Example getter
+(int) get_voting_power(slice addr) method_id {
+    return 0; ;; Implement actual logic
 }

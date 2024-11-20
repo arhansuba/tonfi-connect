@@ -1,254 +1,125 @@
-#pragma version ^0.2.0
+#pragma version ^0.2.0;
 
 #include "./Constants.fc";
 #include "./Math.fc";
 
-;; Security constants
-const int MAX_UINT128 = 340282366920938463463374607431768211455;  ;; 2^128 - 1
-const int TIMELOCK_DELAY = 86400;  ;; 24 hours in seconds
+;; Constants
+const int MAX_UINT128 = 340282366920938463463374607431768211455;
+const int TIMELOCK_DELAY = 86400;
 const int MAX_RETRIES = 3;
-const int COOLDOWN_PERIOD = 3600;  ;; 1 hour in seconds
+const int COOLDOWN_PERIOD = 3600;
 
 ;; Error codes
-const int error::unauthorized = 101;
-const int error::invalid_signature = 102;
-const int error::operation_paused = 103;
-const int error::timelock_not_ready = 104;
-const int error::invalid_nonce = 105;
-const int error::rate_limited = 106;
-const int error::reentrancy = 107;
-const int error::invalid_amount = 108;
-const int error::blacklisted = 109;
+const int error_unauthorized = 101;
+const int error_invalid_sig = 102;
+const int error_paused = 103;
+const int error_timelock = 104;
+const int error_invalid_nonce = 105;
+const int error_rate_limit = 106;
+const int error_reentrancy = 107;
 
-;; Security flags
-global_var paused: Bool;
-global_var owner: Address;
-global_var guardian: Address;
-global_var last_action_time: Int;
-global_var nonce: Int;
+;; Storage variables
+global slice owner;
+global slice guardian;
+global int last_action;
+global int nonce;
+global int paused;
+global cell rate_limits;
+global cell operations;
+global cell blacklist;
+global int entered;
 
-;; Rate limiting
-global_var rate_limits: map<Int, Int>;  ;; operation => max calls per period
-global_var operation_counts: map<Int, Int>;  ;; operation => current count
-global_var last_operation_time: map<Int, Int>;  ;; operation => last timestamp
+() load_data() impure {
+    slice ds = get_data().begin_parse();
+    owner = ds~load_msg_addr();
+    guardian = ds~load_msg_addr();
+    last_action = ds~load_uint(64);
+    nonce = ds~load_uint(32);
+    paused = ds~load_uint(1);
+    rate_limits = ds~load_dict();
+    operations = ds~load_dict();
+    blacklist = ds~load_dict();
+    entered = ds~load_uint(1);
+}
 
-;; Blacklist
-global_var blacklisted: map<Address, Bool>;
+() save_data() impure {
+    set_data(begin_cell()
+        .store_slice(owner)
+        .store_slice(guardian)
+        .store_uint(last_action, 64)
+        .store_uint(nonce, 32)
+        .store_uint(paused, 1)
+        .store_dict(rate_limits)
+        .store_dict(operations)
+        .store_dict(blacklist)
+        .store_uint(entered, 1)
+        .end_cell());
+}
 
-;; Reentrancy guard
-global_var entered: Bool;
-
-;; Access control modifier
 () check_owner() impure inline {
     slice sender = get_sender();
-    throw_unless(error::unauthorized, equal_slices(sender, owner));
+    throw_unless(error_unauthorized, equal_slices(sender, owner));
 }
 
-;; Pause modifier
 () check_not_paused() impure inline {
-    throw_if(error::operation_paused, paused);
+    throw_if(error_paused, paused != 0);
 }
 
-;; Reentrancy guard modifier
 () prevent_reentrancy() impure inline {
-    throw_if(error::reentrancy, entered);
-    entered = true;
+    throw_if(error_reentrancy, entered != 0);
+    entered = 1;
 }
 
-;; Rate limiting
 () check_rate_limit(int operation) impure {
-    int current_time = now();
-    var (last_time, found?) = last_operation_time.get(operation);
-    
-    if (found? & (current_time - last_time < COOLDOWN_PERIOD)) {
-        var (count, _) = operation_counts.get(operation);
-        var (limit, has_limit?) = rate_limits.get(operation);
+    (cell limits, int found) = rate_limits.udict_get?(32, operation);
+    if (found) {
+        slice ls = limits.begin_parse();
+        int limit = ls~load_uint(32);
+        int count = ls~load_uint(32);
+        int last_time = ls~load_uint(64);
         
-        throw_if(error::rate_limited, 
-            has_limit? & (count >= limit));
-            
-        operation_counts.set(operation, count + 1);
-    } else {
-        ;; Reset counter for new period
-        operation_counts.set(operation, 1);
+        if ((now() - last_time) < COOLDOWN_PERIOD) {
+            throw_if(error_rate_limit, count >= limit);
+            count += 1;
+        } else {
+            count = 1;
+        }
+        
+        rate_limits~udict_set(32, operation, 
+            begin_cell()
+                .store_uint(limit, 32)
+                .store_uint(count, 32)
+                .store_uint(now(), 64)
+                .end_cell());
     }
-    
-    last_operation_time.set(operation, current_time);
 }
 
-;; Signature verification
-int verify_signature(slice message, slice signature, slice public_key) method_id {
-    ;; Check signature format
-    throw_unless(error::invalid_signature, 
-        signature.slice_bits() == 512);  ;; ED25519 signature is 512 bits
-        
-    ;; Verify using ton crypto primitives
-    return check_signature(
-        cell_hash(message.end_cell()),
+;; Validation functions
+() validate_amount(int amount) impure inline {
+    throw_if(error_invalid_nonce, amount <= 0);
+    throw_if(error_invalid_nonce, amount > MAX_UINT128);
+}
+
+() validate_signature(slice msg, slice signature, slice public_key) impure inline {
+    throw_unless(error_invalid_sig, check_signature(
+        cell_hash(msg.end_cell()),
         signature,
         public_key
-    );
-}
-
-;; Timelock operations
-() schedule_operation(int operation, cell params) impure {
-    check_owner();
-    
-    ;; Store operation details
-    cell operation_data = begin_cell()
-        .store_uint(operation, 32)
-        .store_uint(now() + TIMELOCK_DELAY, 64)
-        .store_ref(params)
-        .end_cell();
-        
-    ;; Emit operation scheduled event
-    emit_log_operation_scheduled(operation, params);
-}
-
-() execute_operation(int operation, cell params) impure {
-    check_owner();
-    
-    ;; Verify timelock has passed
-    var scheduled_time = get_operation_time(operation);
-    throw_unless(error::timelock_not_ready, 
-        now() >= scheduled_time);
-        
-    ;; Execute operation
-    execute_timelocked_operation(operation, params);
-    
-    ;; Emit operation executed event
-    emit_log_operation_executed(operation);
-}
-
-;; Access control management
-() transfer_ownership(slice new_owner) impure {
-    check_owner();
-    
-    ;; Schedule ownership transfer
-    schedule_operation(
-        op::transfer_ownership,
-        begin_cell().store_slice(new_owner).end_cell()
-    );
-}
-
-() set_guardian(slice new_guardian) impure {
-    check_owner();
-    owner = new_guardian;
-    
-    ;; Emit guardian updated event
-    emit_log_guardian_updated(new_guardian);
-}
-
-;; Emergency controls
-() pause() impure {
-    ;; Allow owner or guardian to pause
-    slice sender = get_sender();
-    throw_unless(error::unauthorized,
-        equal_slices(sender, owner) |
-        equal_slices(sender, guardian));
-        
-    paused = true;
-    
-    ;; Emit pause event
-    emit_log_protocol_paused();
-}
-
-() unpause() impure {
-    check_owner();  ;; Only owner can unpause
-    paused = false;
-    
-    ;; Emit unpause event
-    emit_log_protocol_unpaused();
-}
-
-;; Blacklist management
-() add_to_blacklist(slice address) impure {
-    check_owner();
-    blacklisted.set(address, true);
-    
-    ;; Emit blacklist event
-    emit_log_address_blacklisted(address);
-}
-
-() remove_from_blacklist(slice address) impure {
-    check_owner();
-    blacklisted.delete(address);
-    
-    ;; Emit unblacklist event
-    emit_log_address_unblacklisted(address);
-}
-
-;; Rate limit management
-() set_rate_limit(int operation, int limit) impure {
-    check_owner();
-    rate_limits.set(operation, limit);
-    
-    ;; Emit rate limit update event
-    emit_log_rate_limit_updated(operation, limit);
-}
-
-;; Amount validation
-() validate_amount(int amount) impure inline {
-    throw_if(error::invalid_amount, amount <= 0);
-    throw_if(error::invalid_amount, amount > MAX_UINT128);
-}
-
-;; Nonce management
-() validate_and_increment_nonce(int provided_nonce) impure inline {
-    throw_unless(error::invalid_nonce, provided_nonce == nonce);
-    nonce += 1;
-}
-
-;; Security checks for message handling
-() process_message_securely(slice msg) impure inline {
-    prevent_reentrancy();
-    check_not_paused();
-    
-    ;; Get sender
-    slice sender = get_sender();
-    
-    ;; Check blacklist
-    throw_if(error::blacklisted, 
-        blacklisted.get(sender) ?? false);
-        
-    ;; Proceed with message processing
-    ;; ... (message specific logic)
-    
-    ;; Clear reentrancy flag
-    entered = false;
+    ));
 }
 
 ;; Get methods
-int is_paused() method_id {
+int get_paused() method_id {
+    load_data();
     return paused;
 }
 
 slice get_owner() method_id {
+    load_data();
     return owner;
 }
 
 slice get_guardian() method_id {
+    load_data();
     return guardian;
-}
-
-int get_current_nonce() method_id {
-    return nonce;
-}
-
-int is_blacklisted(slice address) method_id {
-    return blacklisted.get(address) ?? false;
-}
-
-int get_rate_limit(int operation) method_id {
-    return rate_limits.get(operation) ?? 0;
-}
-
-cell get_security_config() method_id {
-    return begin_cell()
-        .store_uint(paused ? 1 : 0, 1)
-        .store_slice(owner)
-        .store_slice(guardian)
-        .store_uint(nonce, 64)
-        .store_uint(last_action_time, 64)
-        .end_cell();
 }

@@ -1,9 +1,15 @@
 import { 
     TonClient, 
     Address, 
-    Contract as TonContract,
-    WalletContractV4, 
-    Contract
+    Contract,
+    ContractProvider,
+    Sender,
+    beginCell,
+    Cell,
+    Dictionary,
+    toNano,
+    WalletContractV4,
+    internal
 } from '@ton/ton';
 import axios from 'axios';
 import { EventEmitter } from 'events';
@@ -23,18 +29,61 @@ interface TokenConfig {
     priceSource: string[];
 }
 
+class OracleContract implements Contract {
+    constructor(
+        readonly address: Address,
+        readonly provider: ContractProvider,
+        readonly init?: { code: Cell; data: Cell }
+    ) {}
+
+    static createFromAddress(address: Address, provider: ContractProvider) {
+        return new OracleContract(address, provider);
+    }
+
+    async getState() {
+        return await this.provider.getState();
+    }
+
+    async sendUpdatePrices(sender: Sender, prices: [string, number][]) {
+        const dict = Dictionary.empty(
+            Dictionary.Keys.BigUint(256),
+            Dictionary.Values.Cell()
+        );
+        
+        prices.forEach(([addr, price]) => {
+            const hashBytes = Address.parse(addr).toRawString();
+            dict.set(
+                BigInt('0x' + hashBytes),
+                beginCell().storeCoins(BigInt(Math.floor(price * 1e9))).endCell()
+            );
+        });
+
+        const messageBody = beginCell()
+            .storeUint(1, 32) // op: update_prices
+            .storeUint(0, 64) // query_id
+            .storeDict(dict)
+            .endCell();
+
+        await this.provider.internal(sender, {
+            value: toNano('0.1'),
+            body: messageBody
+        });
+    }
+}
+
 class PriceOracle extends EventEmitter {
     private prices: Map<string, PriceData> = new Map();
-    private updateInterval: NodeJS.Timer | null = null;
+    private updateInterval: NodeJS.Timeout | null = null;
     private readonly UPDATE_INTERVAL = 60000; // 1 minute
     private readonly PRICE_VALIDITY = 300000; // 5 minutes
     private readonly MAX_PRICE_CHANGE = 10; // 10% max price change
     
     private readonly client: TonClient;
-    private readonly contract: Contract;
+    private readonly contract: OracleContract;
     private readonly tokens: Map<string, TokenConfig> = new Map();
+    private readonly wallet: WalletContractV4;
+    private readonly sender: Sender;
     
-    // Price sources
     private readonly API_KEYS = {
         coingecko: process.env.COINGECKO_API_KEY,
         binance: process.env.BINANCE_API_KEY,
@@ -44,13 +93,46 @@ class PriceOracle extends EventEmitter {
     constructor(
         endpoint: string,
         contractAddress: string,
-        tokenConfigs: TokenConfig[]
+        tokenConfigs: TokenConfig[],
+        wallet: WalletContractV4,
+        secretKey: Buffer
     ) {
         super();
-        this.client = new TonClient({ endpoint });
-        this.contract = new Contract(/* contract info */);
         
-        // Initialize token configs
+        this.client = new TonClient({ endpoint });
+        this.wallet = wallet;
+        
+        const address = Address.parse(contractAddress);
+        this.contract = new OracleContract(
+            address,
+            this.client.provider(address)
+        );
+
+        // Initialize sender
+        this.sender = {
+            address: wallet.address,
+            async send(args: {
+                to: Address;
+                value: bigint;
+                body?: Cell;
+                init?: { code: Cell; data: Cell };
+            }) {
+                const seqno = await wallet.getSeqno(this.client.provider(wallet.address));
+                return await wallet.sendTransfer({
+                    seqno,
+                    secretKey,
+                    messages: [
+                        internal({
+                            to: args.to,
+                            value: args.value,
+                            body: args.body,
+                            init: args.init
+                        })
+                    ]
+                });
+            }
+        };
+        
         tokenConfigs.forEach(config => {
             this.tokens.set(config.address, config);
         });
@@ -59,16 +141,11 @@ class PriceOracle extends EventEmitter {
     async start(): Promise<void> {
         try {
             console.log('Starting price oracle service...');
-            
-            // Initial price fetch
             await this.updateAllPrices();
-            
-            // Start update interval
             this.updateInterval = setInterval(
                 () => this.updateAllPrices(),
                 this.UPDATE_INTERVAL
             );
-            
             this.emit('started');
             console.log('Price oracle service started successfully');
         } catch (error) {
@@ -79,7 +156,7 @@ class PriceOracle extends EventEmitter {
 
     async stop(): Promise<void> {
         if (this.updateInterval) {
-            clearInterval(this.updateInterval as NodeJS.Timeout);
+            clearInterval(this.updateInterval);
             this.updateInterval = null;
         }
         this.emit('stopped');
@@ -87,13 +164,10 @@ class PriceOracle extends EventEmitter {
 
     private async updateAllPrices(): Promise<void> {
         console.log('Updating all prices...');
-        
         const updates: Promise<void>[] = [];
-        
         for (const [address, config] of this.tokens.entries()) {
             updates.push(this.updateTokenPrice(address, config));
         }
-        
         await Promise.allSettled(updates);
     }
 
@@ -102,25 +176,21 @@ class PriceOracle extends EventEmitter {
         config: TokenConfig
     ): Promise<void> {
         try {
-            // Fetch prices from multiple sources
             const prices = await Promise.all(
                 config.priceSource.map(source => 
                     this.fetchPrice(config.symbol, source)
                 )
             );
             
-            // Filter out failed fetches
-            const validPrices = prices.filter(p => p !== null) as number[];
+            const validPrices = prices.filter((p): p is number => p !== null);
             
             if (validPrices.length === 0) {
                 throw new Error(`No valid prices for ${config.symbol}`);
             }
             
-            // Calculate median price
             const sortedPrices = validPrices.sort((a, b) => a - b);
             const medianPrice = sortedPrices[Math.floor(sortedPrices.length / 2)];
             
-            // Validate price change
             const currentPrice = this.prices.get(address);
             if (currentPrice) {
                 const priceChange = Math.abs(
@@ -134,7 +204,6 @@ class PriceOracle extends EventEmitter {
                 }
             }
             
-            // Update price
             this.prices.set(address, {
                 price: medianPrice,
                 timestamp: Date.now(),
@@ -142,7 +211,6 @@ class PriceOracle extends EventEmitter {
                 confidence: this.calculateConfidence(validPrices)
             });
             
-            // Emit update event
             this.emit('priceUpdated', {
                 token: config.symbol,
                 address,
@@ -167,13 +235,10 @@ class PriceOracle extends EventEmitter {
             switch (source) {
                 case 'coingecko':
                     return await this.fetchCoingeckoPrice(symbol);
-                    
                 case 'binance':
                     return await this.fetchBinancePrice(symbol);
-                    
                 case 'tonapi':
                     return await this.fetchTonAPIPrice(symbol);
-                    
                 default:
                     throw new Error(`Unknown price source: ${source}`);
             }
@@ -194,7 +259,6 @@ class PriceOracle extends EventEmitter {
                 }
             }
         );
-        
         return response.data[symbol.toLowerCase()].usd;
     }
 
@@ -210,7 +274,6 @@ class PriceOracle extends EventEmitter {
                 }
             }
         );
-        
         return parseFloat(response.data.price);
     }
 
@@ -223,32 +286,23 @@ class PriceOracle extends EventEmitter {
                 }
             }
         );
-        
         return response.data.price;
     }
 
     private calculateConfidence(prices: number[]): number {
         if (prices.length < 2) return 0;
-        
         const mean = prices.reduce((a, b) => a + b) / prices.length;
         const variance = prices.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / prices.length;
         const stdDev = Math.sqrt(variance);
-        
-        // Higher confidence when standard deviation is lower
         return Math.max(0, 100 - (stdDev / mean * 100));
     }
 
-    // Public Methods
     async getPrice(address: string): Promise<PriceData | null> {
         const price = this.prices.get(address);
-        
         if (!price) return null;
-        
-        // Check if price is stale
         if (Date.now() - price.timestamp > this.PRICE_VALIDITY) {
             return null;
         }
-        
         return price;
     }
 
@@ -256,7 +310,6 @@ class PriceOracle extends EventEmitter {
         return Promise.all(addresses.map(addr => this.getPrice(addr)));
     }
 
-    // On-chain price updates
     async updateOnChainPrices(): Promise<void> {
         try {
             const validPrices: [string, number][] = [];
@@ -268,9 +321,10 @@ class PriceOracle extends EventEmitter {
             }
             
             if (validPrices.length > 0) {
-                await this.contract.call('updatePrices', {
-                    prices: validPrices
-                }).send();
+                await this.contract.sendUpdatePrices(
+                    this.sender,
+                    validPrices
+                );
                 
                 this.emit('onChainUpdated', validPrices);
             }
@@ -280,49 +334,5 @@ class PriceOracle extends EventEmitter {
         }
     }
 }
-
-// Usage example:
-const tokenConfigs: TokenConfig[] = [
-    {
-        symbol: 'TON',
-        address: 'EQC...',
-        decimals: 9,
-        priceSource: ['coingecko', 'binance', 'tonapi']
-    },
-    {
-        symbol: 'WTON',
-        address: 'EQC...',
-        decimals: 9,
-        priceSource: ['coingecko', 'binance']
-    }
-];
-
-const oracle = new PriceOracle(
-    'https://testnet.toncenter.com/api/v2/jsonRPC',
-    'EQC...',  // Oracle contract address
-    tokenConfigs
-);
-
-// Start the oracle
-oracle.start().catch(console.error);
-
-// Event handling
-oracle.on('priceUpdated', (update) => {
-    console.log('Price updated:', update);
-});
-
-oracle.on('priceError', (error) => {
-    console.error('Price error:', error);
-});
-
-oracle.on('onChainUpdated', (prices) => {
-    console.log('On-chain prices updated:', prices);
-});
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-    await oracle.stop();
-    process.exit(0);
-});
 
 export default PriceOracle;
