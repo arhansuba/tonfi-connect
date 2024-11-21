@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import dynamic from 'next/dynamic';
 import { SwapForm } from '../components/SwapForm';
 import { PriceChart } from '../components/PriceChart';
 import { TokenSelect } from '../components/TokenSelect';
 import { useSwap } from '../hooks/useSwap';
-import { useTonConnectUI } from '@tonconnect/ui-react';
 import {
     Tabs,
     TabsContent,
@@ -36,6 +36,12 @@ import {
     Wallet
 } from 'lucide-react';
 
+// Dynamically import TonConnect UI to prevent SSR issues
+const TonConnectUIProvider = dynamic(
+    () => import('@tonconnect/ui-react').then(mod => mod.TonConnectUIProvider),
+    { ssr: false }
+);
+
 interface SwapTransaction {
     hash: string;
     tokenIn: string;
@@ -46,40 +52,61 @@ interface SwapTransaction {
     status: 'pending' | 'completed' | 'failed';
 }
 
-export const SwapPage: React.FC = () => {
-    const [tonConnectUI] = useTonConnectUI();
+interface MarketStats {
+    volumeLast24h: string;
+    trades24h: string;
+    totalLiquidity: string;
+    avgSlippage: string;
+}
+
+interface PoolStats {
+    tvl: string;
+    volume24h: string;
+    fees24h: string;
+    apr: string;
+}
+
+const SwapComponent: React.FC = () => {
     const [activeTab, setActiveTab] = useState('swap');
     const [showSettings, setShowSettings] = useState(false);
     const [transactions, setTransactions] = useState<SwapTransaction[]>([]);
-    
-    // Get wallet address safely
-    const walletAddress = tonConnectUI.account?.address || '';
-    const isConnected = !!tonConnectUI.account;
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
-    const [marketStats, setMarketStats] = useState({
+    const [marketStats] = useState<MarketStats>({
         volumeLast24h: '$1,234,567',
         trades24h: '1,234',
         totalLiquidity: '$5,678,901',
         avgSlippage: '0.2%'
     });
 
-    const [poolStats, setPoolStats] = useState({
+    const [poolStats] = useState<PoolStats>({
         tvl: '$1,234,567',
         volume24h: '$123,456',
         fees24h: '$1,234',
         apr: '12.34%'
     });
 
-
-    // Load transactions from local storage
+    // Load user's transactions
     useEffect(() => {
-        if (isConnected && walletAddress) {
-            const storedTx = localStorage.getItem(`swap_transactions_${walletAddress}`);
-            if (storedTx) {
-                setTransactions(JSON.parse(storedTx));
+        const loadTransactions = async () => {
+            try {
+                setIsLoading(true);
+                const storedTx = localStorage.getItem('swap_transactions');
+                if (storedTx) {
+                    setTransactions(JSON.parse(storedTx));
+                }
+                setIsLoading(false);
+            } catch (err) {
+                setError(err instanceof Error ? err.message : 'Failed to load transactions');
+                setIsLoading(false);
             }
+        };
+
+        if (activeTab === 'history') {
+            loadTransactions();
         }
-    }, [isConnected, walletAddress]);
+    }, [activeTab]);
 
     return (
         <div className="container mx-auto p-4 space-y-6 max-w-4xl">
@@ -221,13 +248,17 @@ export const SwapPage: React.FC = () => {
                                     <CardTitle>Transaction History</CardTitle>
                                 </CardHeader>
                                 <CardContent>
-                                    <div className="space-y-4">
-                                        {transactions.length === 0 ? (
-                                            <div className="text-center py-8 text-gray-500">
-                                                No transactions yet
-                                            </div>
-                                        ) : (
-                                            transactions.map((tx) => (
+                                    {isLoading ? (
+                                        <div className="text-center py-8">Loading...</div>
+                                    ) : error ? (
+                                        <div className="text-center py-8 text-red-500">{error}</div>
+                                    ) : transactions.length === 0 ? (
+                                        <div className="text-center py-8 text-gray-500">
+                                            No transactions yet
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            {transactions.map((tx) => (
                                                 <div
                                                     key={tx.hash}
                                                     className="flex items-center justify-between p-4 border rounded-lg"
@@ -254,9 +285,9 @@ export const SwapPage: React.FC = () => {
                                                         <Info className="h-4 w-4" />
                                                     </a>
                                                 </div>
-                                            ))
-                                        )}
-                                    </div>
+                                            ))}
+                                        </div>
+                                    )}
                                 </CardContent>
                             </Card>
                         </TabsContent>
@@ -317,6 +348,25 @@ export const SwapPage: React.FC = () => {
                 </CardContent>
             </Card>
         </div>
+    );
+};
+
+// Wrap with TonConnect provider
+const SwapPage: React.FC = () => {
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => {
+        setMounted(true);
+    }, []);
+
+    if (!mounted) {
+        return null;
+    }
+
+    return (
+        <TonConnectUIProvider manifestUrl="https://github.com/arhansuba/tonfi-connect/blob/master/front-end/public/manifest.json">
+            <SwapComponent />
+        </TonConnectUIProvider>
     );
 };
 

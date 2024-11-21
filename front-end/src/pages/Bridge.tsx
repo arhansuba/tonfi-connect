@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import dynamic from 'next/dynamic';
 import { BridgeForm } from '../components/BridgeForm';
 import { PriceChart } from '../components/PriceChart';
 import { TokenSelect } from '../components/TokenSelect';
-import { useTonConnectUI } from '@tonconnect/ui-react';
 import { 
     Tabs,
     TabsContent,
@@ -34,6 +34,12 @@ import {
     AlertCircle 
 } from 'lucide-react';
 
+// Dynamically import TonConnect UI to prevent SSR issues
+const TonConnectUIProvider = dynamic(
+    () => import('@tonconnect/ui-react').then(mod => mod.TonConnectUIProvider),
+    { ssr: false }
+);
+
 interface Transaction {
     id: string;
     sourceChain: string;
@@ -46,11 +52,19 @@ interface Transaction {
     requiredConfirmations: number;
 }
 
-export const BridgePage: React.FC = () => {
-    useTonConnectUI();
+interface ChainInfo {
+    name: string;
+    icon: string;
+    status: 'operational' | 'degraded' | 'down';
+    latestBlock: number;
+}
+
+const BridgeComponent: React.FC = () => {
     const [activeTab, setActiveTab] = useState('bridge');
     const [transactions, setTransactions] = useState<Transaction[]>([]);
     const [showRiskDialog, setShowRiskDialog] = useState(true);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     // Statistics for the bridge
     const stats = {
@@ -61,7 +75,7 @@ export const BridgePage: React.FC = () => {
     };
 
     // Supported chains info
-    const chains = [
+    const chains: ChainInfo[] = [
         {
             name: 'TON',
             icon: '/chains/ton.svg',
@@ -81,6 +95,25 @@ export const BridgePage: React.FC = () => {
             latestBlock: 29876543
         }
     ];
+
+    // Load transaction history
+    useEffect(() => {
+        const loadTransactions = async () => {
+            try {
+                setIsLoading(true);
+                // Add your transaction loading logic here
+                // const loadedTransactions = await ...
+                setIsLoading(false);
+            } catch (err) {
+                setError(err instanceof Error ? err.message : 'Failed to load transactions');
+                setIsLoading(false);
+            }
+        };
+
+        if (activeTab === 'history') {
+            loadTransactions();
+        }
+    }, [activeTab]);
 
     return (
         <div className="container mx-auto p-4 space-y-6 max-w-4xl">
@@ -149,6 +182,7 @@ export const BridgePage: React.FC = () => {
                                         key={chain.name}
                                         className="flex items-center space-x-2 p-2 rounded-lg border"
                                     >
+                                        {/* eslint-disable-next-line @next/next/no-img-element */}
                                         <img
                                             src={chain.icon}
                                             alt={chain.name}
@@ -204,7 +238,11 @@ export const BridgePage: React.FC = () => {
                             </CardDescription>
                         </CardHeader>
                         <CardContent>
-                            {transactions.length === 0 ? (
+                            {isLoading ? (
+                                <div className="text-center py-8">Loading...</div>
+                            ) : error ? (
+                                <div className="text-center py-8 text-red-500">{error}</div>
+                            ) : transactions.length === 0 ? (
                                 <div className="text-center py-8 text-gray-500">
                                     No transactions yet
                                 </div>
@@ -282,6 +320,25 @@ export const BridgePage: React.FC = () => {
                 </CardContent>
             </Card>
         </div>
+    );
+};
+
+// Wrap with TonConnect provider
+const BridgePage: React.FC = () => {
+    const [mounted, setMounted] = useState(false);
+
+    useEffect(() => {
+        setMounted(true);
+    }, []);
+
+    if (!mounted) {
+        return null;
+    }
+
+    return (
+        <TonConnectUIProvider manifestUrl="https://github.com/arhansuba/tonfi-connect/blob/master/front-end/public/manifest.json">
+            <BridgeComponent />
+        </TonConnectUIProvider>
     );
 };
 

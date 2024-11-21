@@ -11,6 +11,7 @@ import {
     WalletContractV4,
     internal
 } from '@ton/ton';
+import { mnemonicToPrivateKey } from '@ton/crypto';
 import axios from 'axios';
 import { EventEmitter } from 'events';
 import { BigNumber } from 'bignumber.js';
@@ -29,6 +30,18 @@ interface TokenConfig {
     priceSource: string[];
 }
 
+interface PriceUpdateEvent {
+    token: string;
+    address: string;
+    price: number;
+}
+
+interface PriceErrorEvent {
+    token: string;
+    address: string;
+    error: Error;
+}
+
 class OracleContract implements Contract {
     constructor(
         readonly address: Address,
@@ -36,7 +49,7 @@ class OracleContract implements Contract {
         readonly init?: { code: Cell; data: Cell }
     ) {}
 
-    static createFromAddress(address: Address, provider: ContractProvider) {
+    static createFromAddress(address: Address, provider: ContractProvider): OracleContract {
         return new OracleContract(address, provider);
     }
 
@@ -44,14 +57,14 @@ class OracleContract implements Contract {
         return await this.provider.getState();
     }
 
-    async sendUpdatePrices(sender: Sender, prices: [string, number][]) {
+    async sendUpdatePrices(sender: Sender, prices: [string, number][]): Promise<void> {
         const dict = Dictionary.empty(
             Dictionary.Keys.BigUint(256),
             Dictionary.Values.Cell()
         );
         
         prices.forEach(([addr, price]) => {
-            const hashBytes = Address.parse(addr).toRawString();
+            const hashBytes = Address.parse(addr).hash.toString('hex');
             dict.set(
                 BigInt('0x' + hashBytes),
                 beginCell().storeCoins(BigInt(Math.floor(price * 1e9))).endCell()
@@ -77,6 +90,8 @@ class PriceOracle extends EventEmitter {
     private readonly UPDATE_INTERVAL = 60000; // 1 minute
     private readonly PRICE_VALIDITY = 300000; // 5 minutes
     private readonly MAX_PRICE_CHANGE = 10; // 10% max price change
+    private readonly MAX_RETRIES = 3;
+    private readonly RETRY_DELAY = 1000; // 1 second
     
     private readonly client: TonClient;
     private readonly contract: OracleContract;
@@ -85,9 +100,9 @@ class PriceOracle extends EventEmitter {
     private readonly sender: Sender;
     
     private readonly API_KEYS = {
-        coingecko: process.env.COINGECKO_API_KEY,
-        binance: process.env.BINANCE_API_KEY,
-        tonapi: process.env.TONAPI_KEY
+        coingecko: process.env.COINGECKO_API_KEY || '',
+        binance: process.env.BINANCE_API_KEY || '',
+        tonapi: process.env.TONAPI_KEY || ''
     };
 
     constructor(
@@ -103,12 +118,11 @@ class PriceOracle extends EventEmitter {
         this.wallet = wallet;
         
         const address = Address.parse(contractAddress);
-        this.contract = new OracleContract(
-            address,
-            this.client.provider(address)
-        );
-
-        // Initialize sender
+        const provider = this.client.provider(address);
+        this.contract = new OracleContract(address, provider);
+        
+        // Initialize sender with proper provider and async get methods
+        const walletProvider = this.client.provider(wallet.address);
         this.sender = {
             address: wallet.address,
             async send(args: {
@@ -116,20 +130,25 @@ class PriceOracle extends EventEmitter {
                 value: bigint;
                 body?: Cell;
                 init?: { code: Cell; data: Cell };
-            }) {
-                const seqno = await wallet.getSeqno(this.client.provider(wallet.address));
-                return await wallet.sendTransfer({
-                    seqno,
-                    secretKey,
-                    messages: [
-                        internal({
-                            to: args.to,
-                            value: args.value,
-                            body: args.body,
-                            init: args.init
-                        })
-                    ]
-                });
+            }): Promise<void> {
+                try {
+                    const seqno = await wallet.getSeqno(walletProvider);
+                    await wallet.sendTransfer(walletProvider, {
+                            seqno,
+                            secretKey,
+                            messages: [
+                                internal({
+                                    to: args.to,
+                                    value: args.value,
+                                    body: args.body,
+                                    init: args.init
+                                })
+                            ]
+                        });
+                } catch (error) {
+                    console.error('Send transaction failed:', error);
+                    throw error;
+                }
             }
         };
         
@@ -162,6 +181,28 @@ class PriceOracle extends EventEmitter {
         this.emit('stopped');
     }
 
+    private async withRetry<T>(
+        operation: () => Promise<T>,
+        retries = this.MAX_RETRIES
+    ): Promise<T> {
+        let lastError: Error | null = null;
+        
+        for (let i = 0; i < retries; i++) {
+            try {
+                return await operation();
+            } catch (error) {
+                lastError = error as Error;
+                if (i < retries - 1) {
+                    await new Promise(resolve => 
+                        setTimeout(resolve, this.RETRY_DELAY * Math.pow(2, i))
+                    );
+                }
+            }
+        }
+        
+        throw lastError;
+    }
+
     private async updateAllPrices(): Promise<void> {
         console.log('Updating all prices...');
         const updates: Promise<void>[] = [];
@@ -178,7 +219,7 @@ class PriceOracle extends EventEmitter {
         try {
             const prices = await Promise.all(
                 config.priceSource.map(source => 
-                    this.fetchPrice(config.symbol, source)
+                    this.withRetry(() => this.fetchPrice(config.symbol, source))
                 )
             );
             
@@ -215,15 +256,15 @@ class PriceOracle extends EventEmitter {
                 token: config.symbol,
                 address,
                 price: medianPrice
-            });
+            } as PriceUpdateEvent);
             
         } catch (error) {
             console.error(`Failed to update price for ${config.symbol}:`, error);
             this.emit('priceError', {
                 token: config.symbol,
                 address,
-                error
-            });
+                error: error as Error
+            } as PriceErrorEvent);
         }
     }
 
@@ -321,9 +362,11 @@ class PriceOracle extends EventEmitter {
             }
             
             if (validPrices.length > 0) {
-                await this.contract.sendUpdatePrices(
-                    this.sender,
-                    validPrices
+                await this.withRetry(() => 
+                    this.contract.sendUpdatePrices(
+                        this.sender,
+                        validPrices
+                    )
                 );
                 
                 this.emit('onChainUpdated', validPrices);
