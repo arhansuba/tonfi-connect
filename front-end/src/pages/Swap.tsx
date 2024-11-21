@@ -1,5 +1,8 @@
-import React, { useState, useEffect } from 'react';
+'use client';
+import { ClientComponent } from '@/components/ClientComponent';
+import { useClientSide } from '@/hooks/useClientSide';
 import dynamic from 'next/dynamic';
+import React, { useState, useEffect } from 'react';
 import { SwapForm } from '../components/SwapForm';
 import { PriceChart } from '../components/PriceChart';
 import { TokenSelect } from '../components/TokenSelect';
@@ -9,14 +12,14 @@ import {
     TabsContent,
     TabsList,
     TabsTrigger
-} from '@/components/ui/tabs';
+} from '../../components/ui/tabs';
 import {
     Card,
     CardContent,
     CardDescription,
     CardHeader,
     CardTitle
-} from '@/components/ui/card';
+} from '../../components/ui/card';
 import {
     Sheet,
     SheetContent,
@@ -24,8 +27,8 @@ import {
     SheetHeader,
     SheetTitle,
     SheetTrigger,
-} from "@/components/ui/sheet";
-import { Button } from '@/components/ui/button';
+} from "../../components/ui/sheet";
+import { Button } from '../../components/ui/button';
 import {
     Settings,
     History,

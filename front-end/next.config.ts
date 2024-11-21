@@ -1,19 +1,15 @@
-/** @type {import('next').NextConfig} */
+// next.config.ts
 const nextConfig = {
   reactStrictMode: true,
-  webpack: (config: { externals: { 'utf-8-validate': string; bufferutil: string; }[]; }) => {
-    config.externals.push({
-      'utf-8-validate': 'commonjs utf-8-validate',
-      'bufferutil': 'commonjs bufferutil',
-    });
+  webpack: (config: { resolve: { fallback: any; }; }) => {
+    config.resolve.fallback = {
+      ...config.resolve.fallback,
+      fs: false,
+      net: false,
+      tls: false,
+    };
     return config;
   },
-  // Disable static page generation for pages that need TON Connect
-  unstable_runtimeJS: true,
-  experimental: {
-    // This will help prevent SSR for pages that need browser APIs
-    runtime: 'edge'
-  }
-};
+}
 
-module.exports = nextConfig;
+export default nextConfig;
