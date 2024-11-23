@@ -1,97 +1,45 @@
-#pragma version ^0.2.0;
+#pragma version ^0.4.1;
 
-;; Constants
-const int MAX_INT = 340282366920938463463374607431768211455;  ;; 2^128 - 1
-const int PRECISION = 1000000000;  ;; 10^9
-const int SQRT_PRECISION = 100000;  ;; For sqrt approx
-
-;; Error codes
-const int error_overflow = 401;
-const int error_division_by_zero = 402;
-const int error_invalid_input = 403;
-
-;; Basic Math Functions
-int add(int a, int b) inline {
+;; Safe math operations for DeFi applications
+(int) safe_add(int a, int b) inline {
     int c = a + b;
-    throw_if(error_overflow, c < a);
+    throw_unless(101, c >= a);
     return c;
 }
 
-int sub(int a, int b) inline {
-    throw_if(error_overflow, a < b);
+(int) safe_sub(int a, int b) inline {
+    throw_unless(101, a >= b);
     return a - b;
 }
 
 
 
-int div(int a, int b) inline {
-    throw_if(error_division_by_zero, b == 0);
+(int) safe_div(int a, int b) inline {
+    throw_unless(101, b != 0);
     return a / b;
 }
 
-;; AMM Functions
-int sqrt(int x) inline {
-    throw_if(error_invalid_input, x < 0);
-    if (x == 0) {
-        return 0;
-    }
-    
+;; DeFi specific math operations
+
+
+
+
+(int) sqrt(int x) inline {
+    if (x == 0) { return 0; }
     int z = (x + 1) / 2;
     int y = x;
-    
-    repeat(8) {
-        if (z < y) {
-            y = z;
-            z = (x / z + z) / 2;
-        }
+    while (z < y) {
+        y = z;
+        z = (x / z + z) / 2;
     }
-    
     return y;
 }
 
-int get_amount_out(int amount_in, int reserve_in, int reserve_out, 
-                  int fee_num, int fee_denom) inline {
-    throw_if(error_invalid_input, amount_in <= 0);
-    throw_if(error_invalid_input, reserve_in <= 0);
-    throw_if(error_invalid_input, reserve_out <= 0);
-    
-    int amount_with_fee = mul(amount_in, sub(fee_denom, fee_num));
-    int numerator = mul(amount_with_fee, reserve_out);
-    int denominator = add(mul(reserve_in, fee_denom), amount_with_fee);
-    
-    return div(numerator, denominator);
+;; Percentage and fee calculations 
+(int) calculate_percentage(int value, int percentage, int base) inline {
+    return muldiv(value, percentage, base);
 }
 
-int calc_liquidity(int amount0, int amount1, int reserve0, int reserve1, 
-                  int total_supply) inline {
-    if (total_supply == 0) {
-        return sqrt(mul(amount0, amount1));
-    }
-    
-    return min(
-        div(mul(amount0, total_supply), reserve0),
-        div(mul(amount1, total_supply), reserve1)
-    );
-}
-
-;; Helper Functions
-int min(int a, int b) inline {
-    if (a > b) { 
-        return b;
-    }
-    return a;
-}
-
-int max(int a, int b) inline {
-    if (a > b) {
-        return a;
-    }
-    return b;
-}
-
-int muldiv(int x, int y, int z) inline {
-    throw_if(error_division_by_zero, z == 0);
-    int result = div(mul(x, y), z);
-    throw_if(error_overflow, result * z != x * y);
-    return result;
+(int) calculate_fee(int amount, int fee_numerator, int fee_denominator) inline {
+    return muldiv(amount, fee_numerator, fee_denominator);
 }
