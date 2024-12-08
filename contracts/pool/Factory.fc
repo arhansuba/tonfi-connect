@@ -1,0 +1,104 @@
+#pragma version ^0.4.1;
+#include "../imports/stdlib.fc";
+#include "../utils/Constants.fc";
+#include "../utils/Math.fc";
+#include "../utils/Security.fc";
+
+;; Operation codes
+const int op_create_pool = 1;
+const int op_set_fee_to = 2;
+const int op_set_fee_protocol = 3;
+const int op_collect_fee = 4;
+const int op_upgrade_pool = 5;
+
+;; Error codes
+const int error_unauthorized = 101;
+const int error_pool_exists = 102;
+const int error_invalid_tokens = 103;
+const int error_invalid_fee = 104;
+const int error_pool_not_found = 105;
+
+;; Constants
+const int MIN_FEE = 1;      ;; 0.01%
+const int MAX_FEE = 1000;   ;; 10%
+
+;; Storage variables
+global slice owner;           
+global slice pool_impl;    
+global slice fee_to;
+global int fee_protocol;     
+global int pool_count;
+global cell pools_dict;      
+global cell pairs_dict;     
+
+() load_data() impure {
+    slice ds = get_data().begin_parse();
+    owner = ds~load_msg_addr();
+    pool_impl = ds~load_msg_addr();
+    fee_to = ds~load_msg_addr();
+    fee_protocol = ds~load_uint(16);
+    pool_count = ds~load_uint(32);
+    pools_dict = ds~load_dict();
+    pairs_dict = ds~load_dict();
+}
+
+() save_data() impure {
+    set_data(begin_cell()
+        .store_slice(owner)
+        .store_slice(pool_impl)
+        .store_slice(fee_to)
+        .store_uint(fee_protocol, 16)
+        .store_uint(pool_count, 32)
+        .store_dict(pools_dict)
+        .store_dict(pairs_dict)
+        .end_cell());
+}
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { return (); }
+    
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) { return (); }
+    
+    slice sender = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
+    
+    load_data();
+    
+    if (op == op_create_pool) {
+        handle_create_pool(sender, in_msg_body);
+    }
+    
+    save_data();
+}
+
+() handle_create_pool(slice sender, slice msg) impure {
+    throw_unless(error_unauthorized, equal_slices(sender, owner));
+    
+    slice token0 = msg~load_msg_addr();
+    slice token1 = msg~load_msg_addr();
+    int fee = msg~load_uint(16);
+    
+    throw_unless(error_invalid_fee, (fee >= MIN_FEE) & (fee <= MAX_FEE));
+    
+    cell state_init = calculate_state_init(token0, token1, fee);
+    slice pool_addr = calculate_address(0, state_init);
+    
+    ;; Deploy pool
+    send_raw_message(begin_cell()
+        .store_uint(0x18, 6)
+        .store_slice(pool_addr)
+        .store_coins(0)
+        .store_uint(4 + 2 + 1, 1 + 4 + 4 + 64 + 32 + 1 + 1 + 1)
+        .store_ref(state_init)
+        .end_cell(), 64);
+        
+    pool_count += 1;
+}
+
+;; Get methods
+int get_pool_count() method_id {
+    load_data();
+    return pool_count;
+}

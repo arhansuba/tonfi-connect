@@ -1,0 +1,200 @@
+#pragma version ^0.4.1;
+#include "../imports/stdlib.fc";
+#include "../utils/Constants.fc";
+
+;; Constants
+const int MIN_LIQUIDITY = 1000;
+const int FEE_NUMERATOR = 3;
+const int FEE_DENOMINATOR = 1000;
+
+;; Operation codes
+const int op::init = 1;
+const int op::swap = 2;
+const int op::add_liquidity = 3;
+const int op::remove_liquidity = 4;
+
+;; Error codes
+const int error::unauthorized = 101;
+const int error::tokens_equal = 102;
+const int error::insufficient_amount = 103;
+const int error::insufficient_liquidity = 104;
+const int error::invalid_k = 105;
+const int error::slippage = 106;
+
+;; Storage Variables
+global int total_supply;
+global int reserve0;
+global int reserve1; 
+global cell lp_wallets;
+global slice owner;
+global slice token0;
+global slice token1;
+
+;; Helper function for slice comparison
+int equal_slice_bits(slice s1, slice s2) inline {
+    return slice_hash(s1) == slice_hash(s2);
+}
+
+;; Removed redundant muldiv function since it's built-in
+
+() load_data() impure {
+    slice ds = get_data().begin_parse();
+    total_supply = ds~load_coins();
+    reserve0 = ds~load_coins();
+    reserve1 = ds~load_coins();
+    lp_wallets = ds~load_dict();
+    owner = ds~load_msg_addr();
+    token0 = ds~load_msg_addr();
+    token1 = ds~load_msg_addr();
+}
+
+() save_data() impure {
+    set_data(begin_cell()
+        .store_coins(total_supply)
+        .store_coins(reserve0)
+        .store_coins(reserve1)
+        .store_dict(lp_wallets)
+        .store_slice(owner)
+        .store_slice(token1)
+        .store_slice(token0)
+        .end_cell());
+}
+
+() update_lp_balance(slice address, int amount) impure {
+    (cell balance_cell, int found) = udict_get_ref?(lp_wallets, 267, slice_hash(address));
+    int current_balance = 0;
+    if (found) {
+        current_balance = balance_cell.begin_parse().preload_coins();
+    }
+    
+    int new_balance = current_balance + amount;
+    throw_if(error::insufficient_liquidity, new_balance < 0);
+    
+    lp_wallets~udict_set(267, slice_hash(address), 
+        begin_cell().store_coins(new_balance).end_cell().begin_parse());
+}
+
+() handle_add_liquidity(slice sender, slice in_msg_body) impure {
+    int amount0_desired = in_msg_body~load_coins();
+    int amount1_desired = in_msg_body~load_coins();
+    int amount0_min = in_msg_body~load_coins();
+    int amount1_min = in_msg_body~load_coins();
+    
+    throw_if(error::insufficient_amount, ((amount0_desired <= 0) | (amount1_desired <= 0)));
+    
+    int amount0;
+    int amount1;
+    
+    if (total_supply == 0) {
+        amount0 = amount0_desired;
+        amount1 = amount1_desired;
+        total_supply = MIN_LIQUIDITY;
+    } else {
+        ;; Using built-in muldiv function
+        int amount1_optimal = muldiv(amount0_desired, reserve1, reserve0);
+        if (amount1_optimal <= amount1_desired) {
+            amount1 = amount1_optimal;
+        } else {
+            amount0 = muldiv(amount1_desired, reserve0, reserve1);
+        }
+    }
+    
+    ;; Update reserves and mint LP tokens
+    reserve0 += amount0;
+    reserve1 += amount1;
+    
+    if (total_supply > 0) {
+        int liquidity = min(
+            muldiv(amount0, total_supply, reserve0),
+            muldiv(amount1, total_supply, reserve1)
+        );
+        update_lp_balance(sender, liquidity);
+        total_supply += liquidity;
+    }
+}
+
+;; Rest of the contract remains the same...
+
+() recv_internal(int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) { return (); }
+
+    slice cs = in_msg_full.begin_parse();
+    cs~skip_bits(4);
+    slice sender = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32);
+
+    load_data();
+
+    if (op == op::init) {
+        throw_if(error::unauthorized, ~ equal_slice_bits(sender, owner));
+        token0 = in_msg_body~load_msg_addr();
+        token1 = in_msg_body~load_msg_addr();
+        throw_if(error::tokens_equal, equal_slice_bits(token0, token1));
+    }
+    
+    elseif (op == op::add_liquidity) {
+        handle_add_liquidity(sender, in_msg_body);
+    }
+
+    elseif (op == op::swap) {
+        int is_token1 = in_msg_body~load_uint(1);
+        int amount_in = in_msg_body~load_coins();
+        int min_out = in_msg_body~load_coins();
+        
+        throw_if(error::insufficient_amount, amount_in <= 0);
+        
+        int in_reserve = is_token1 ? reserve1 : reserve0;
+        int out_reserve = is_token1 ? reserve0 : reserve1;
+        
+        ;; Calculate output amount with fee
+        int amount_with_fee = muldiv(amount_in, FEE_DENOMINATOR - FEE_NUMERATOR, FEE_DENOMINATOR);
+        int amount_out = muldiv(amount_with_fee, out_reserve, in_reserve + amount_with_fee);
+        throw_if(error::slippage, amount_out < min_out);
+        
+        ;; Update reserves
+        if (is_token1) {
+            reserve1 += amount_in;
+            reserve0 -= amount_out;
+        } else {
+            reserve0 += amount_in;
+            reserve1 -= amount_out;
+        }
+        
+        ;; Verify k
+        int k = reserve0 * reserve1;
+        throw_if(error::invalid_k, k < ((in_reserve * out_reserve) - 1));
+        
+        ;; Send token output
+        cell msg = begin_cell()
+            .store_uint(0x18, 6)
+            .store_slice(is_token1 ? token0 : token1)
+            .store_coins(amount_out)
+            .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+            .store_uint(op::swap, 32)
+            .store_slice(sender)
+            .end_cell();
+        send_raw_message(msg, 1);
+    }
+
+    save_data();
+}
+
+;; Get methods
+(int) get_lp_balance(slice address) method_id {
+    load_data();
+    (cell balance_cell, int found) = udict_get_ref?(lp_wallets, 267, slice_hash(address));
+    if (found) {
+        return balance_cell.begin_parse().preload_coins();
+    }
+    return 0;
+}
+
+(int, int) get_reserves() method_id {
+    load_data();
+    return (reserve0, reserve1);
+}
+
+(int) get_total_supply() method_id {
+    load_data();
+    return total_supply;
+}

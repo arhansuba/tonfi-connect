@@ -1,0 +1,110 @@
+#pragma version ^0.4.1;
+#include "../imports/stdlib.fc";
+
+;; ============================================================================
+;; Safe Math Operations
+;; ============================================================================
+
+(int) safe_add(int a, int b) inline {
+    int c = a + b;
+    throw_unless(101, c >= a); ;; Overflow check
+    return c;
+}
+
+(int) safe_sub(int a, int b) inline {
+    throw_unless(101, a >= b); ;; Underflow check
+    return a - b;
+}
+
+(int) safe_mul(int a, int b) inline {
+    ;; Fixed OR operator and type matching
+    if ((a == 0) | (b == 0)) { 
+        return 0; 
+    }
+    int c = a * b;
+    throw_unless(101, c / a == b); ;; Overflow check
+    return c;
+}
+
+(int) safe_div(int a, int b) inline {
+    throw_unless(101, b != 0); ;; Division by zero check
+    return a / b;
+}
+
+;; ============================================================================
+;; DeFi Math Operations
+;; ============================================================================
+
+(int) sqrt(int x) inline {
+    if (x == 0) { return 0; }
+    if (x <= 3) { return 1; }
+    
+    int z = (x + 1) / 2;
+    int y = x;
+    
+    repeat(20) { ;; Limit iterations for gas efficiency
+        if (z >= y) { 
+            return y; ;; Early return for optimization
+        }
+        y = z;
+        z = (x / z + z) / 2;
+    }
+    
+    return y;
+}
+
+;; ============================================================================
+;; Percentage and Fee Calculations
+;; ============================================================================
+
+(int) calculate_percentage(int value, int percentage, int base) inline {
+    throw_unless(101, base != 0);
+    return muldiv(value, percentage, base);
+}
+
+(int) calculate_fee(int amount, int fee_numerator, int fee_denominator) inline {
+    throw_unless(101, fee_denominator != 0);
+    return muldiv(amount, fee_numerator, fee_denominator);
+}
+
+;; ============================================================================
+;; AMM Specific Calculations
+;; ============================================================================
+
+(int) get_amount_out(int amount_in, int reserve_in, int reserve_out, int fee_numerator, int fee_denominator) inline {
+    ;; Input validation
+    throw_unless(101, amount_in > 0);
+    throw_unless(101, reserve_in > 0);
+    throw_unless(101, reserve_out > 0);
+    throw_unless(101, fee_denominator > fee_numerator);
+    
+    ;; Calculate amount with fee
+    int amount_in_with_fee = safe_mul(amount_in, safe_sub(fee_denominator, fee_numerator));
+    int numerator = safe_mul(amount_in_with_fee, reserve_out);
+    int denominator = safe_add(safe_mul(reserve_in, fee_denominator), amount_in_with_fee);
+    
+    return safe_div(numerator, denominator);
+}
+
+(int) get_amount_in(int amount_out, int reserve_in, int reserve_out, int fee_numerator, int fee_denominator) inline {
+    ;; Input validation
+    throw_unless(101, amount_out > 0);
+    throw_unless(101, reserve_in > 0);
+    throw_unless(101, reserve_out > 0);
+    throw_unless(101, fee_denominator > fee_numerator);
+    throw_unless(101, amount_out < reserve_out);
+    
+    ;; Calculate input amount
+    int numerator = safe_mul(safe_mul(reserve_in, amount_out), fee_denominator);
+    int denominator = safe_mul(
+        safe_sub(reserve_out, amount_out), 
+        safe_sub(fee_denominator, fee_numerator)
+    );
+    
+    return safe_add(safe_div(numerator, denominator), 1);
+}
+
+
+() main_math() {
+    ;; Empty main as this is a math library
+}
