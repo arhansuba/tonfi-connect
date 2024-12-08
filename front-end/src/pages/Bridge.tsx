@@ -1,3 +1,4 @@
+'use client';
 import React, { useState, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { BridgeForm } from '../components/BridgeForm';
@@ -220,8 +221,8 @@ const BridgeComponent: React.FC = () => {
                         <CardContent>
                             <PriceChart 
                                 tokenPair={{
-                                    tokenIn: 'TON',
-                                    tokenOut: 'ETH'
+                                    from: 'TON',
+                                    to: 'ETH'
                                 }}
                                 height={300}
                             />

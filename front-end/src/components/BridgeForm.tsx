@@ -1,3 +1,4 @@
+'use client';
 import React, { useState, useEffect } from 'react';
 import { useBridge } from '../hooks/useBridge';
 import { ArrowDownUp, Info, ArrowRight, AlertCircle } from 'lucide-react';

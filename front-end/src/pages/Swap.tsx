@@ -125,8 +125,8 @@ const SwapComponent: React.FC = () => {
                         <CardContent>
                             <PriceChart
                                 tokenPair={{
-                                    tokenIn: 'TON',
-                                    tokenOut: 'USDT'
+                                    from: 'TON',
+                                    to: 'USDT'
                                 }}
                                 height={300}
                             />

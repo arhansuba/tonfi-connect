@@ -1,3 +1,4 @@
+'use client';
 import React, { useState, useEffect, useMemo } from 'react';
 import {
     LineChart,
@@ -22,8 +23,8 @@ interface PriceData {
 }
 
 interface TokenPair {
-    tokenIn: string;
-    tokenOut: string;
+    from: string;
+    to: string;
 }
 
 type TimeFrame = '1H' | '24H' | '1W' | '1M' | 'ALL';
@@ -67,7 +68,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
 
                 // Simulate API call - replace with actual API
                 const response = await fetch(
-                    `/api/prices?tokenIn=${tokenPair.tokenIn}&tokenOut=${tokenPair.tokenOut}&timeFrame=${timeFrame}`
+                    `/api/prices?tokenIn=${tokenPair.from}&tokenOut=${tokenPair.to}&timeFrame=${timeFrame}`
                 );
                 
                 if (!response.ok) throw new Error('Failed to fetch price data');

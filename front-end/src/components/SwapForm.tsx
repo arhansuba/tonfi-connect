@@ -1,3 +1,4 @@
+'use client';
 import React, { useState, useEffect } from 'react';
 import { useSwap } from '../hooks/useSwap';
 import { Address } from '@ton/core';
