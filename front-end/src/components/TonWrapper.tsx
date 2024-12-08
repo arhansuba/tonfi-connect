@@ -3,7 +3,7 @@
 
 import React, { useEffect, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Skeleton } from '../../components/ui/skeleton';
+import { Skeleton } from '@/components/ui/skeleton';
 
 const TonConnectUIProvider = dynamic(
   () => import('@tonconnect/ui-react').then((mod) => mod.TonConnectUIProvider),
@@ -21,11 +21,11 @@ export function TonWrapper({ children }: { children: React.ReactNode }) {
   }, []);
 
   if (!mounted) {
-    return null;
+    return <Skeleton className="h-full w-full" />;
   }
 
   return (
-    <TonConnectUIProvider manifestUrl="/tonconnect-manifest.json">
+    <TonConnectUIProvider>
       {children}
     </TonConnectUIProvider>
   );

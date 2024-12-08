@@ -13,9 +13,10 @@ import {
     Alert,
     AlertDescription,
 } from '@/components/ui/alert';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+
 import { useTonConnectUI } from '@tonconnect/ui-react';
+import { Button } from './ui/button';
+import { Input } from './ui/input';
 
 // Define shared interface for chain information
 export interface Chain {

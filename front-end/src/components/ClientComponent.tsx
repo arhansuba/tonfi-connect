@@ -1,7 +1,7 @@
 // src/components/ClientComponent.tsx
 'use client';
 
-import { Skeleton } from '../../components/ui/skeleton';
+import { Skeleton } from '@/components/ui/skeleton';
 import { useEffect, useState } from 'react';
 
 export function ClientComponent({ children }: { children: React.ReactNode }) {

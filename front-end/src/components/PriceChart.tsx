@@ -9,10 +9,11 @@ import {
     Area,
     AreaChart
 } from 'recharts';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Skeleton } from '@/components/ui/skeleton';
+
 import { format } from 'date-fns';
+import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
+import { Button } from './ui/button';
+import { Skeleton } from './ui/skeleton';
 
 interface PriceData {
     timestamp: number;

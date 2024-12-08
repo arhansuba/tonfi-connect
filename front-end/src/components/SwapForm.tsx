@@ -1,31 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { useSwap } from '../hooks/useSwap';
 import { Address } from '@ton/core';
-import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowDown, Settings, AlertCircle, ArrowRightLeft } from 'lucide-react';
-import {
-    Alert,
-    AlertDescription,
-    AlertTitle,
-} from '@/components/ui/alert';
-import {
-    Dialog,
-    DialogContent,
-    DialogHeader,
-    DialogTitle,
-    DialogTrigger,
-} from '@/components/ui/dialog';
-import {
-    Card,
-    CardContent,
-    CardDescription,
-    CardFooter,
-    CardHeader,
-    CardTitle,
-} from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { useTonConnectUI, TonConnect } from '@tonconnect/ui-react';
+import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
+import { Dialog, DialogContent, DialogTitle, DialogTrigger } from '@radix-ui/react-dialog';
+import { Settings, ArrowDown, AlertCircle } from 'lucide-react';
+import { Input } from './ui/input';
+import { Button } from './ui/button';
+import { Alert, AlertTitle, AlertDescription } from './ui/alert';
+import { DialogHeader } from './ui/dialog';
+import { Skeleton } from './ui/skeleton';
 
 interface Token {
     symbol: string;
@@ -135,10 +119,10 @@ export const SwapForm: React.FC = () => {
                 {/* Input Amount */}
                 <div className="rounded-lg border p-4 space-y-2">
                     <div className="flex justify-between">
-                        <Input
+                        <input
                             type="number"
                             value={inputAmount}
-                            onChange={(e) => setInputAmount(e.target.value)}
+                            onChange={(e: { target: { value: string; }; }) => setInputAmount(e.target.value)}
                             placeholder="0.0"
                             className="border-none text-2xl w-2/3"
                         />
@@ -274,7 +258,7 @@ export const SwapForm: React.FC = () => {
                                 <Input
                                     type="number"
                                     value={settings.deadline}
-                                    onChange={(e) =>
+                                    onChange={(e: { target: { value: any; }; }) =>
                                         updateSettings({
                                             deadline: Number(e.target.value),
                                         })

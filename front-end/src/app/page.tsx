@@ -1,102 +1,120 @@
-import Image from "next/image";
 import React from "react";
 
 export default function Home() {
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+    <div className="container mx-auto p-8">
+      <h1 className="text-3xl font-bold mb-4">Problem Statement</h1>
+      <p className="mb-8">
+        The TON ecosystem currently faces fragmented liquidity across multiple DEXs and limited cross-chain interoperability. Users need to navigate multiple platforms to find the best rates, while cross-chain transfers remain complex and risky.
+      </p>
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      <h1 className="text-3xl font-bold mb-4">Solution</h1>
+      <p className="mb-8">
+        TONFi Connect is a groundbreaking cross-chain liquidity aggregator and bridge specifically optimized for TON, designed to solve these critical challenges:
+      </p>
+
+      <h2 className="text-2xl font-bold mb-4">Liquidity Aggregation</h2>
+      <ul className="list-disc list-inside mb-8">
+        <li>Unifies liquidity pools across all major TON DEXs</li>
+        <li>Smart routing finds the best rates automatically</li>
+        <li>Reduces slippage and improves trade execution</li>
+        <li>One interface for accessing all TON's liquidity</li>
+      </ul>
+
+      <h2 className="text-2xl font-bold mb-4">Intelligent Bridge</h2>
+      <ul className="list-disc list-inside mb-8">
+        <li>Secure cross-chain transfers with multi-sig validation</li>
+        <li>Direct integration with major chains (ETH, BSC initially)</li>
+        <li>Optimized gas fees through efficient routing</li>
+        <li>Simple, user-friendly bridging experience</li>
+      </ul>
+
+      <h2 className="text-2xl font-bold mb-4">AI-Powered Features</h2>
+      <ul className="list-disc list-inside mb-8">
+        <li>Real-time arbitrage opportunity detection</li>
+        <li>Price impact prediction and warnings</li>
+        <li>Smart gas fee optimization</li>
+        <li>Risk assessment and security monitoring</li>
+      </ul>
+
+      <h2 className="text-2xl font-bold mb-4">Key Innovations</h2>
+      <h3 className="text-xl font-bold mb-4">Technical Innovation</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>First unified liquidity aggregator on TON</li>
+        <li>Novel path-finding algorithm for optimal routes</li>
+        <li>Gas-optimized smart contract architecture</li>
+        <li>Secure multi-chain message verification</li>
+      </ul>
+
+      <h3 className="text-xl font-bold mb-4">User Experience</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>Seamless Telegram Mini App integration</li>
+        <li>One-click optimal trading</li>
+        <li>Simple cross-chain transfers</li>
+        <li>Real-time price and gas analytics</li>
+      </ul>
+
+      <h3 className="text-xl font-bold mb-4">Economic Model</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>Sustainable fee structure</li>
+        <li>Incentivized liquidity provision</li>
+        <li>Cross-chain efficiency savings</li>
+        <li>Fair value distribution to participants</li>
+      </ul>
+
+      <h2 className="text-2xl font-bold mb-4">Impact on TON Ecosystem</h2>
+      <h3 className="text-xl font-bold mb-4">Liquidity Improvement</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>Reduces fragmentation</li>
+        <li>Increases capital efficiency</li>
+        <li>Better price discovery</li>
+        <li>Enhanced trading experience</li>
+      </ul>
+
+      <h3 className="text-xl font-bold mb-4">Cross-Chain Growth</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>Facilitates asset inflow from other chains</li>
+        <li>Expands TON's DeFi capabilities</li>
+        <li>Increases total value locked (TVL)</li>
+        <li>Grows the user base</li>
+      </ul>
+
+      <h3 className="text-xl font-bold mb-4">Technical Advancement</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>Sets new standards for TON DeFi</li>
+        <li>Demonstrates TON's scalability</li>
+        <li>Encourages further innovation</li>
+        <li>Improves overall ecosystem maturity</li>
+      </ul>
+
+      <h2 className="text-2xl font-bold mb-4">Future Potential</h2>
+      <h3 className="text-xl font-bold mb-4">Expansion Plans</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>Additional chain integrations</li>
+        <li>Advanced trading features</li>
+        <li>Institutional-grade tools</li>
+        <li>Mobile app development</li>
+      </ul>
+
+      <h3 className="text-xl font-bold mb-4">Community Growth</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>DAO governance implementation</li>
+        <li>Community-driven development</li>
+        <li>Educational resources</li>
+        <li>Developer tools and APIs</li>
+      </ul>
+
+      <h3 className="text-xl font-bold mb-4">Market Impact</h3>
+      <ul className="list-disc list-inside mb-8">
+        <li>Potential to become TON's primary DeFi hub</li>
+        <li>Cross-chain liquidity leadership</li>
+        <li>Setting industry standards</li>
+        <li>Driving ecosystem adoption</li>
+      </ul>
+
+      <p className="mb-8">
+        TONFi Connect aims to be more than just another DeFi protocol - it represents a fundamental infrastructure upgrade for the TON ecosystem, making decentralized finance more accessible, efficient, and secure for everyone. By solving critical liquidity and interoperability challenges, we're building essential infrastructure for TON's next growth phase. This vision aligns perfectly with the hackathon's goals of discovering and supporting groundbreaking blockchain projects on TON, while addressing real user needs and technical challenges in a way that can drive significant ecosystem growth and adoption.
+      </p>
     </div>
   );
 }

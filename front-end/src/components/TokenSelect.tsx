@@ -1,24 +1,11 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { Search, ChevronDown, ExternalLink, Star, StarOff } from 'lucide-react';
-import {
-    Dialog,
-    DialogContent,
-    DialogHeader,
-    DialogTitle,
-    DialogTrigger,
-} from '@/components/ui/dialog';
-import {
-    Command,
-    CommandDialog,
-    CommandEmpty,
-    CommandGroup,
-    CommandInput,
-    CommandItem,
-    CommandList,
-} from '@/components/ui/command';
-import { Button } from '@/components/ui/button';
-import { ScrollArea } from '@/components/ui/scroll-area';
-import { Badge } from '@/components/ui/badge';
+import { Search, ChevronDown, ExternalLink, Star, StarOff, Badge, Command } from 'lucide-react';
+import { Dialog, DialogTrigger, DialogContent, DialogTitle } from '@radix-ui/react-dialog';
+import { ScrollArea } from '@radix-ui/react-scroll-area';
+import { CommandInput, CommandList, CommandEmpty, CommandItem } from 'cmdk';
+import { Button } from './ui/button';
+import { DialogHeader } from './ui/dialog';
+
 
 interface Token {
     symbol: string;
@@ -136,7 +123,7 @@ export const TokenSelect: React.FC<TokenSelectProps> = ({
             } else {
                 newFavorites.add(tokenAddress);
             }
-            localStorage.setItem('favoriteTokens', JSON.stringify([...newFavorites]));
+            localStorage.setItem('favoriteTokens', JSON.stringify(Array.from(newFavorites)));
             return newFavorites;
         });
     }, []);
@@ -249,7 +236,7 @@ export const TokenSelect: React.FC<TokenSelectProps> = ({
                                             <span className="text-sm text-gray-500">
                                                 {formatPrice(token.price)}
                                             </span>
-                                            <Badge variant="secondary" className="text-xs">
+                                            <Badge className="text-xs">
                                                 24h: {formatVolume(token.volume24h)}
                                             </Badge>
                                         </div>

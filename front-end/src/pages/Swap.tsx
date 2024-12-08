@@ -1,43 +1,21 @@
 'use client';
-import { ClientComponent } from '@/components/ClientComponent';
-import { useClientSide } from '@/hooks/useClientSide';
 import dynamic from 'next/dynamic';
 import React, { useState, useEffect } from 'react';
 import { SwapForm } from '../components/SwapForm';
 import { PriceChart } from '../components/PriceChart';
-import { TokenSelect } from '../components/TokenSelect';
-import { useSwap } from '../hooks/useSwap';
-import {
-    Tabs,
-    TabsContent,
-    TabsList,
-    TabsTrigger
-} from '../../components/ui/tabs';
-import {
-    Card,
-    CardContent,
-    CardDescription,
-    CardHeader,
-    CardTitle
-} from '../../components/ui/card';
-import {
-    Sheet,
-    SheetContent,
-    SheetDescription,
-    SheetHeader,
-    SheetTitle,
-    SheetTrigger,
-} from "../../components/ui/sheet";
-import { Button } from '../../components/ui/button';
+
 import {
     Settings,
     History,
     TrendingUp,
     Info,
     BarChart2,
-    Clock,
-    Wallet
-} from 'lucide-react';
+    Clock} from 'lucide-react';
+import { Sheet } from '@/components/ui/sheet';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { SheetTrigger, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@radix-ui/react-tabs';
+import { Button } from '@/components/ui/button';
 
 // Dynamically import TonConnect UI to prevent SSR issues
 const TonConnectUIProvider = dynamic(

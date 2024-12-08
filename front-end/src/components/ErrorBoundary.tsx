@@ -3,8 +3,8 @@
 
 
 import { Component, ErrorInfo, PropsWithChildren } from 'react';
-import { Alert, AlertDescription, AlertTitle } from '../../components/ui/alert';
-import { Button } from '../../components/ui/button';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 
 interface State {
   hasError: boolean;
